@@ -1,0 +1,11 @@
+.idea/
+.env
+.venv/
+data/
+aws_cost_analysis_output/
+aws_cost_analysis_input/
+env_aws_15_accts.xlsx
+*.iml
+__pycache__/
+*.pyc
+*.pyo
