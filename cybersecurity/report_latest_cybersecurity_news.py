@@ -3,7 +3,14 @@ Cybersecurity Breach News AI Agent
 This agent searches for cybersecurity breach news from today and sends email alerts.
 """
 import os
-
+import re
+from google import genai
+from google.genai import types
+import os
+from PIL import Image
+import requests
+from io import BytesIO
+from django.conf import settings
 import requests
 import json
 from datetime import datetime, date, time
@@ -14,6 +21,9 @@ from enum import Enum
 from newspaper import Article
 
 total_cost = 0
+
+AI_MODEL_ALL = 'sonar-pro'
+AI_MODEL_GET_NEWS = 'sonar-reasoning-pro'
 
 class NewsItem:
     """Data class to store news item information"""
@@ -26,18 +36,69 @@ class NewsItem:
     number_of_records_breached: str
     names_of_threat_actors: str
 
-def get_article_text(url):
-    article = Article(url)
 
-    # Download the article content
-    article.download()
+def call_gemini_api(prompt, model_specifier = ''):
+    global total_cost
 
-    # Parse the article
-    article.parse()
+    GOOGLE_GEMINI_API_KEY = os.getenv('GOOGLE_GEMINI_API_KEY')
+    client = genai.Client(api_key=GOOGLE_GEMINI_API_KEY)
 
-    return f"{article.title}\n\n{article.text}\n\n{article.keywords}"
+    # Define the grounding tool
+    grounding_tool = types.Tool(
+        google_search=types.GoogleSearch()
+    )
 
-def call_perplexity_api(prompt: str):
+    # Configure generation settings to use the tool
+    config = types.GenerateContentConfig(
+        tools=[grounding_tool]
+    )
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents= prompt,
+        config=config,
+    )
+
+    try:
+        # Costs per 1 million tokens for gemini-2.5-flash
+        INPUT_COST_PER_M_TOKENS = 0.30  # USD [1]
+        OUTPUT_COST_PER_M_TOKENS = 2.50  # USD [1]
+
+        # Cost per 1000 requests for Grounding with Google Search
+        GROUNDING_COST_PER_K_REQUESTS = 35.00  # USD [1]
+
+        # free for up to 1500 requests per day, so it's free to us
+        GROUNDING_COST_PER_K_REQUESTS = 0
+
+        input_tokens = response.usage_metadata.prompt_token_count
+        output_tokens = response.usage_metadata.candidates_token_count
+
+        # Check if grounding was used by looking for the `grounding_metadata` field.
+        # The `web_search_queries` array lists the searches performed by the model.[3]
+        if hasattr(response.candidates, 'grounding_metadata'):
+            search_queries_count = len(response.candidates.grounding_metadata.web_search_queries)
+        else:
+            search_queries_count = 0
+
+        # --- Step 4: Calculate the total cost ---
+
+        # Calculate token costs
+        input_cost = (input_tokens / 1_000_000) * INPUT_COST_PER_M_TOKENS
+        output_cost = (output_tokens / 1_000_000) * OUTPUT_COST_PER_M_TOKENS
+
+        # Calculate grounding cost (this is only billed after the free tier)
+        grounding_cost = (search_queries_count / 1_000) * GROUNDING_COST_PER_K_REQUESTS
+
+        cost = input_cost + output_cost + grounding_cost
+
+        total_cost += cost
+        print('Total cost so far:', total_cost)
+    except Exception as e:
+        print("Couldn't get gemini cost: ", e)
+
+    return response
+
+def call_perplexity_api(prompt: str, model: str):
     global total_cost
 
     """Call Perplexity API"""
@@ -50,10 +111,11 @@ def call_perplexity_api(prompt: str):
     }
 
     data = {
-        "model": "sonar-pro",
+        "model": model,
         "messages": [
             {"role": "user", "content": prompt}
-        ]
+        ],
+        "temperature": 0.7
     }
 
     response = requests.post(API_URL, headers=headers, json=data)
@@ -79,61 +141,105 @@ def call_perplexity_api(prompt: str):
 
     return result
 
-def get_news_from_perplexity() -> List[NewsItem]:
-    """Get news from Perplexity API"""
-    today_str = datetime.now().strftime("%B %d, %Y")
+import os
+import requests # Make sure you have this import at the top of your file
 
-    prompt = f"""Retrieve all unique news stories published today about companies that experienced a cybersecurity breach.
+def confirm_article_url(article, today_str):
 
-                    If there are no news stories today, reply "No news today".
-                    
-                    Perform a thorough search, reviewing multiple reputable sources to ensure completeness.
-                    
-                    Do not omit any relevant stories found.
-                    
-                    Return results as a JSON array. For each story, include:
-                    
-                    - title
-                    - url
-                    - source
-                    - summary
-                    - published_date
-                    - full_text_of_article
-                    - number_of_records_breached (if unknown, put "unknown")
-                    - names_of_threat_actors (if unknown, put "unknown")
-                    
-                    For multiple news articles about the same breach at the same company, include only the most comprehensive or earliest story in your results.
-                    
-                    Maximum of 10 unique companies (breaches). List up to one story per company or breach.
-                    
-                    To ensure consistency across runs:
-                    
-                    Always use the same date range: ["{today_str} 00:00" to "{today_str} 23:59" UTC].
-                    
-                    Consistently define a "unique" breach as one where the affected company and incident are distinct.
-                    
-                    Sort the stories in the same, deterministic way (e.g., alphabetical order by company name or by published time descending).
-                    
-                    Ensure stories are not omitted due to deduplication.
-                    
-                    Return only the formatted JSON.
+    # some of these vertex article_urls resolve to the real article
+    final_url = requests.head(article['url'], allow_redirects=True).url
+    if 'vertex' not in final_url:
+        article['url'] = final_url
+        return article
+
+    # and, some only resolve to a 404
+    # let's try to look up the correct url
+
+    prompt = f"""
+        Find the url from today, {today_str}, that talks about this:
+        
+        {article['summary']}
+        
+        Return data about one single url. The published data for the url must be in this range: ["{today_str} 00:00" to "{today_str} 23:59" UTC].
+
+        Return the results as a JSON array. Include:
+        
+        - title
+        - url
+        - source
+        - summary
+        - published_date
+        - full_text_of_article
+        - number_of_records_breached (if unknown, put "unknown")
+        - names_of_threat_actors (if unknown, put "unknown")
     """
 
-    try:
-        python_object = call_perplexity_api(prompt)
-        articles = python_object["choices"][0]["message"]["content"]
-        clean_json = articles.strip().removeprefix('```json').removesuffix('```').strip()
-        articles_object = json.loads(clean_json)
-        today = datetime.today().strftime('%Y-%m-%d')
-        #make sure all stories are from today
-        filtered = [item for item in articles_object if item.get('published_date') == today]
-
-        return filtered
-    except Exception as e:
-        print(f"Error getting news from Perplexity: {e}")
-        return []
+    python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
+    article_string = python_object["choices"][0]["message"]["content"]
+    clean_json = article_string.strip().removeprefix('```json').removesuffix('```').strip()
+    article_new =json.loads(clean_json)
+    return article_new[0]
 
 
+    # I tried doing it this way but a lot of the time it gave me a wrong url
+    # e.g. something from the wrong date, or a link to a site in chines
+    # api_key = os.getenv('GOOGLE_CUSTOM_SEARCH_API_KEY')
+    # search_engine_id = os.getenv('GOOGLE_CUSTOM_API_SEARCH_ENGINE_ID')
+    #
+    # api_url = "https://www.googleapis.com/customsearch/v1"
+    # params = {
+    #     'key': api_key,
+    #     'cx': search_engine_id,
+    #     'q': article_summary,
+    #     'num': 5
+    # }
+    #
+    # try: # Begin try block for error handling
+    #     response = requests.get(api_url, params=params)
+    #     response.raise_for_status() # Raises an HTTPError for bad responses (4xx or 5xx)
+    #     results = response.json()
+    #
+    #     if 'items' in results:
+    #         # First, try to find a non-Facebook link
+    #         non_facebook_link = None
+    #         for item in results['items']:
+    #             if 'facebook.com' not in item['link'].lower():  # Using .lower() for case-insensitive check
+    #                 print(f"Title: {item['title']}")
+    #                 print(f"URL: {item['link']}")
+    #                 print("---")
+    #                 non_facebook_link = item['link']
+    #                 break  # Return the first non-Facebook link found
+    #
+    #         if non_facebook_link:
+    #             return non_facebook_link  # Return the non-Facebook link if found
+    #
+    #         # If no non-Facebook link found, return the first Facebook link (if any)
+    #         if results['items']:  # Ensure 'items' isn't empty before accessing
+    #             facebook_link = results['items'][0]['link']
+    #             print(f"Title: {results['items'][0]['title']}")
+    #             print(f"URL: {facebook_link}")
+    #             print("---")
+    #             return facebook_link
+    # except Exception as e:
+    #     print(f"confirm_article_url: {e}")  # e.g., 400, 404, 500
+
+    return None  # Return None if no links found in the results or an error occurred
+
+def extract_reasoning_and_json(text):
+    """
+    Extracts content inside <think>...</think> to 'reasoning',
+    and first JSON array inside triple backticks (``````) to 'response_object'.
+    """
+    # Extract everything inside <think>...</think>
+    reasoning_match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    reasoning = reasoning_match.group(1).strip() if reasoning_match else None
+
+    # Extract the JSON block between ``````
+    pattern = r'```json\s*(.*?)(?:```|$)'
+    match = re.search(pattern, text, re.DOTALL)
+    response_object = json.loads(match.group(1).strip()) if match else None
+
+    return reasoning, response_object
 
 
 # Configure logging to track agent decisions
@@ -252,89 +358,119 @@ class TrueAIBreachAgent:
         self.context_memory.append(f"{decision_type}: {ai_reasoning}")
         logging.info(f"AI AGENT DECISION: {decision_type} - {ai_reasoning}")
 
-    # def search_breach_news(self) -> List[Dict]:
-    #     todays_news = get_news_from_newsapi()
-    #
-    #     """
-    #     AI DECISION POINT 1: Let AI determine optimal search strategy
-    #     """
-    #     search_strategy_prompt = f"""
-    #         You are a cybersecurity intelligence agent focused on healthcare industry threats.
-    #
-    #         Current date: {datetime.now().strftime('%Y-%m-%d')}
-    #         Target audience: Healthcare cybersecurity professionals
-    #
-    #         INSTRUCTIONS:
-    #         - Do NOT provide a list of current news articles or incident summaries.
-    #         - Instead, explain the optimal search strategy for finding today's cybersecurity breach news affecting the healthcare sector.
-    #         - Address these points in detail:
-    #         - What search terms would capture the most relevant incidents?
-    #         - Should specific types of attacks be included in the queries?
-    #         - How can one ensure that search results are healthcare-specific?
-    #         - Provide structured reasoning for each recommendation.
-    #         - Present your answers in well-organized Markdown with tables, bullet points, and headings.
-    #         - Structure your answer as a guide, not a search result response.
-    #
-    #         Return ONLY the strategy and reasoning, not news summaries or links.
-    #     """
-    #
-    #     ai_response = call_perplexity_api(search_strategy_prompt)
-    #     ai_response_object = json.loads(ai_response)
-    #     message = ai_response_object['choices'][0]['message']['content']
-    #
-    #     (print(json.dumps(ai_response, indent=2)))
-    #     self.log_ai_decision("Search Strategy Planning", ai_response)
-    #
-    #     return ai_response
+    def get_news_from_llm(self) -> List[NewsItem]:
+        """Get news from Perplexity API"""
+        today_str = datetime.now().strftime("%B %d, %Y")
+
+        prompt = f"""Retrieve all unique news stories published today about companies that experienced a cybersecurity breach.
+    
+                        If there are no news stories today, reply "No news today".
+                        
+                        Perform a thorough search, reviewing multiple reputable sources to ensure completeness.
+                        
+                        Do not omit any relevant stories found.
+                        
+                        Return results as a JSON array. For each story, include:
+                        
+                        - title
+                        - url
+                        - source
+                        - summary
+                        - published_date
+                        - full_text_of_article
+                        - number_of_records_breached (if unknown, put "unknown")
+                        - names_of_threat_actors (if unknown, put "unknown")
+                        
+                        For multiple news articles about the same breach at the same company, include only the most comprehensive or earliest story in your results.
+                        
+                        Maximum of 30 unique companies (breaches). List up to one story per company or breach.
+                        
+                        To ensure consistency across runs:
+                        
+                        Always use the same date range: ["{today_str} 00:00" to "{today_str} 23:59" UTC].
+                        
+                        Consistently define a "unique" breach as one where the affected company and incident are distinct.
+                        
+                        Sort the stories in the same, deterministic way (e.g., alphabetical order by company name or by published time descending).
+                        
+                        Ensure stories are not omitted due to deduplication.
+                        
+                        Return only the formatted JSON.
+        """
+
+        python_object = call_gemini_api(prompt, AI_MODEL_ALL)
+
+        try:
+            # this works for objects returned by perplexity
+            articles = python_object["choices"][0]["message"]["content"]
+            clean_json = articles.strip().removeprefix('```json').removesuffix('```').strip()
+            reasoning, articles_object = extract_reasoning_and_json(clean_json)
+        except Exception as e:
+            # this works for objects returned by Gemini
+            reasoning, articles_object =  extract_reasoning_and_json(python_object.text)
+            # google likes to provide vertexaisearch.cloud.google.com urls that redirect to the real url
+            # let's get the real url
+            for idx, article in enumerate(articles_object):
+                url = article['url']
+                if 'vertex' in url:
+                    # sometimes the google api returns a vertex url that is a 404
+                    # -- but the article is real
+                    #let's get the real URLs
+
+                    article_new = confirm_article_url(article, today_str)
+                    articles_object[idx] = article_new
+
+        self.log_ai_decision("Get News Articles", reasoning, None)
+        return articles_object
 
     def ai_categorize_incident(self, search_result: Dict) -> tuple[BreachCategory, str]:
-        """
-        AI DECISION POINT 2: Let AI analyze and categorize each incident
-        """
-        article_full_text = search_result['full_text_of_article']
+            """
+            AI DECISION POINT 2: Let AI analyze and categorize each incident
+            """
+            article_full_text = search_result['full_text_of_article']
 
-        categorization_prompt = f"""
-        You are a cybersecurity analyst specializing in healthcare industry threats.
-        
-        Analyze and categorize this cybersecurity incident:
-        
-        FullText: {article_full_text}
-        
-        Categories to choose from:
-        - HOSPITAL: Direct hospital/health system incidents
-        - MEDICAL: Other medical/healthcare related (clinics, medical devices, etc.)
-        - BUSINESS: Non-healthcare business incidents (but relevant for threat intelligence)
-        
-        For healthcare cybersecurity professionals, consider:
-        - PHI/medical data involvement
-        - Healthcare infrastructure relevance
-        - Regulatory implications (HIPAA, etc.)
-        - Direct patient care impact
-        
-        Respond in this format:
-        Category: [HOSPITAL/MEDICAL/BUSINESS]
-        Reasoning: [Your detailed analysis of why this categorization is appropriate]
-        """
+            categorization_prompt = f"""
+            You are a cybersecurity analyst specializing in healthcare industry threats.
+            
+            Analyze and categorize this cybersecurity incident:
+            
+            FullText: {article_full_text}
+            
+            Categories to choose from:
+            - HOSPITAL: Direct hospital/health system incidents
+            - MEDICAL: Other medical/healthcare related (clinics, medical devices, etc.)
+            - BUSINESS: Non-healthcare business incidents (but relevant for threat intelligence)
+            
+            For healthcare cybersecurity professionals, consider:
+            - PHI/medical data involvement
+            - Healthcare infrastructure relevance
+            - Regulatory implications (HIPAA, etc.)
+            - Direct patient care impact
+            
+            Respond in this format:
+            Category: [HOSPITAL/MEDICAL/BUSINESS]
+            Reasoning: [Your detailed analysis of why this categorization is appropriate]
+            """
 
-        ai_response_object = call_perplexity_api(categorization_prompt)
-        ai_response_message = ai_response_object["choices"][0]["message"]["content"]
-        clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
+            ai_response_object = call_perplexity_api(categorization_prompt, AI_MODEL_ALL)
+            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+            clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
 
-        parsed = self.llm.parse_structured_response(clean_string, ["Category", "Reasoning"])
+            parsed = self.llm.parse_structured_response(clean_string, ["Category", "Reasoning"])
 
-        category_str = parsed.get("category", "BUSINESS").upper()
-        reasoning = parsed.get("reasoning", "AI categorization reasoning not parsed correctly")
+            category_str = parsed.get("category", "BUSINESS").upper()
+            reasoning = parsed.get("reasoning", "AI categorization reasoning not parsed correctly")
 
-        if "medical" in category_str.lower():
-            a = 100
-        try:
-            category = BreachCategory(category_str.replace('*', '').lower())
-        except ValueError:
-            category = BreachCategory.BUSINESS
-            reasoning += f" (Note: AI returned '{category_str}', defaulted to BUSINESS)"
+            if "medical" in category_str.lower():
+                a = 100
+            try:
+                category = BreachCategory(category_str.replace('*', '').lower())
+            except ValueError:
+                category = BreachCategory.BUSINESS
+                reasoning += f" (Note: AI returned '{category_str}', defaulted to BUSINESS)"
 
-        self.log_ai_decision("Incident Categorization", reasoning, category.value)
-        return category, reasoning
+            self.log_ai_decision("Incident Categorization", reasoning, category.value)
+            return category, reasoning
 
     def ai_assess_severity(self, search_result: Dict, category: BreachCategory) -> tuple[SeverityLevel, int, str]:
         """
@@ -372,7 +508,7 @@ class TrueAIBreachAgent:
         Reasoning: [Your detailed severity analysis considering all factors]
         """
 
-        ai_response_object = call_perplexity_api(severity_prompt)
+        ai_response_object = call_perplexity_api(severity_prompt, AI_MODEL_ALL)
         ai_response_message = ai_response_object["choices"][0]["message"]["content"]
         clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
 
@@ -394,7 +530,7 @@ class TrueAIBreachAgent:
         except:
             affected_count = 0
 
-        self.log_ai_decision("Severity Assessment", reasoning, f"{severity.value}/{affected_count}")
+        self.log_ai_decision(f"{search_result['title']} Severity Assessment", reasoning, f"{severity.value}/{affected_count}")
         return severity, affected_count, reasoning
 
     def ai_extract_technical_details(self, search_result: Dict, category: BreachCategory) -> tuple[List[str], str]:
@@ -487,7 +623,7 @@ class TrueAIBreachAgent:
         Reasoning: [Your detailed prioritization logic]
         """
 
-        ai_response_object = call_perplexity_api(prioritization_prompt)
+        ai_response_object = call_perplexity_api(prioritization_prompt, AI_MODEL_ALL)
         ai_response_message = ai_response_object["choices"][0]["message"]["content"]
         clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
         parsed = self.llm.parse_structured_response(clean_string, ["Priority Order", "Reasoning"])
@@ -526,6 +662,7 @@ class TrueAIBreachAgent:
                 "affected": incident.affected_count,
                 "summary": incident.summary,  # Limit for prompt size
                 "source": incident.source,
+                "severity": incident.severity,
                 "url": incident.url,
                 "date": incident.publish_date,
                 "names_of_potential_threat_actors": incident.names_of_threat_actors,
@@ -562,7 +699,9 @@ class TrueAIBreachAgent:
         - Hospital: white text on green rounded rect
         - Medical:  white text on light green rounded rect
         - Business: white text on #3965bc rounded rect
-
+        
+        Make sure to put breach_category on its own separate line
+    
         For each article, include the following:
         - Title
         - Summary
@@ -578,7 +717,7 @@ class TrueAIBreachAgent:
         HTML: [Complete HTML email code]
         """
 
-        ai_response_object = call_perplexity_api(format_prompt)
+        ai_response_object = call_perplexity_api(format_prompt, AI_MODEL_ALL)
         ai_response_message = ai_response_object["choices"][0]["message"]["content"]
         clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
 
@@ -594,7 +733,7 @@ class TrueAIBreachAgent:
         self.log_ai_decision("AI Agent Initialization", "Starting true AI-driven cybersecurity breach analysis for healthcare industry", "STARTED")
 
         # AI Decision Pipeline - each step uses LLM calls
-        search_results = get_news_from_perplexity()
+        search_results = self.get_news_from_llm()
 
         processed_incidents = []
         for result in search_results:
@@ -638,7 +777,7 @@ class TrueAIBreachAgent:
         Provide a brief executive summary of what the AI agent accomplished.
         """
 
-        ai_response_object = call_perplexity_api(summary_prompt)
+        ai_response_object = call_perplexity_api(summary_prompt, AI_MODEL_ALL)
         ai_response_message = ai_response_object["choices"][0]["message"]["content"]
         clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
 
@@ -653,7 +792,6 @@ class TrueAIBreachAgent:
             "total_ai_decisions": len(self.decision_log)
         }
 
-# Example usage
 def startAI_Agent():
     global total_cost
 
@@ -675,6 +813,10 @@ def startAI_Agent():
     print(f"AI decisions made: {results['total_ai_decisions']}")
     print(f"AI summary: {results['ai_summary']}")
 
+    file_path = settings.BASE_DIR / 'output' / 'reasoning.md'
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write('AI Agent Reasoning')
+
     print(f"\n🧠 AI DECISION LOG:")
     for i, log_entry in enumerate(results['decision_log'], 1):
         print(f"\n[{log_entry['timestamp']}] AI Decision #{i}: {log_entry['decision_type']}")
@@ -685,11 +827,19 @@ def startAI_Agent():
         if log_entry['outcome']:
             print(f"    ✅ Outcome: {log_entry['outcome']}")
 
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[{log_entry['timestamp']}] AI Decision #{i}: {log_entry['decision_type']}")
+            f.write(f"\n - {log_entry['ai_reasoning']}")
+            if log_entry['outcome']:
+                print(f"\n - Outcome: {log_entry['outcome']}")
+            f.write(f"\n-----\n\n")
+
     print(f"\n📧 AI-GENERATED EMAIL HTML:")
     print("HTML email ready for delivery (length:", len(results['email_html']), "characters)")
 
     # Save HTML to file
-    with open("ai_breach_report.html", "w", encoding="utf-8") as f:
+    file_path = settings.BASE_DIR / 'output' / 'ai_breach_report.html'
+    with open(file_path, "w", encoding="utf-8") as f:
         f.write(results['email_html'])
     print("✅ AI-generated HTML report saved to 'ai_breach_report.html'")
 
