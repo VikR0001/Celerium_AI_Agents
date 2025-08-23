@@ -119,6 +119,7 @@ def call_perplexity_api(prompt: str, model: str):
     }
 
     response = requests.post(API_URL, headers=headers, json=data)
+    result = None
     try:
         result = response.json()
     except Exception as e:
@@ -144,11 +145,23 @@ def call_perplexity_api(prompt: str, model: str):
 import os
 import requests # Make sure you have this import at the top of your file
 
+def link_returns_status_200(url):
+    result = False
+    response = requests.get(url)
+    if response.status_code == 200:
+        result = True
+    return result
+
+
 def confirm_article_url(article, today_str):
 
     # some of these vertex article_urls resolve to the real article
-    final_url = requests.head(article['url'], allow_redirects=True).url
-    if 'vertex' not in final_url:
+    if 'vertex' in article['url']:
+        final_url = requests.head(article['url'], allow_redirects=True).url
+        article['url'] = final_url
+
+    final_url = article['url']
+    if link_returns_status_200(final_url):
         article['url'] = final_url
         return article
 
@@ -174,10 +187,29 @@ def confirm_article_url(article, today_str):
         - names_of_threat_actors (if unknown, put "unknown")
     """
 
-    python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
-    article_string = python_object["choices"][0]["message"]["content"]
-    clean_json = article_string.strip().removeprefix('```json').removesuffix('```').strip()
-    article_new =json.loads(clean_json)
+    retry_count = 0
+    MAX_RETRY_ATTEMPTS = 5
+    got_our_data = False
+    while not got_our_data and retry_count < MAX_RETRY_ATTEMPTS:
+        python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
+        article_string = python_object["choices"][0]["message"]["content"]
+        clean_json = article_string.strip().removeprefix('```json').removesuffix('```').strip()
+        try:
+            article_new =json.loads(clean_json)
+
+            #confirm url is not a 404
+            try:
+                url = article_new["url"]
+            except Exception as e:
+                url =  article_new[0]['url']
+
+            if link_returns_status_200(url):
+                got_our_data = True
+        except Exception as e:
+            print('confirm_article_url: ', e)
+            retry_count += 1
+            got_our_data = False
+
     return article_new[0]
 
 
@@ -263,7 +295,6 @@ class BreachIncident:
     affected_count: int
     source: str
     url: str
-    details: List[str]
     summary: str
     publish_date: str
     ai_reasoning: str
@@ -345,10 +376,11 @@ class TrueAIBreachAgent:
         self.decision_log = []
         self.context_memory = []  # Agent maintains context across decisions
 
-    def log_ai_decision(self, decision_type: str, ai_reasoning: str, outcome: Any = None):
+    def log_ai_decision(self, decision_type: str, decision_title: str, ai_reasoning: str, outcome: Any = None):
         """Track AI agent's decision-making process"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_entry = {
+            "title": decision_title,
             "timestamp": timestamp,
             "decision_type": decision_type,
             "ai_reasoning": ai_reasoning,
@@ -412,15 +444,10 @@ class TrueAIBreachAgent:
             # let's get the real url
             for idx, article in enumerate(articles_object):
                 url = article['url']
-                if 'vertex' in url:
-                    # sometimes the google api returns a vertex url that is a 404
-                    # -- but the article is real
-                    #let's get the real URLs
+                article_new = confirm_article_url(article, today_str)
+                articles_object[idx] = article_new
 
-                    article_new = confirm_article_url(article, today_str)
-                    articles_object[idx] = article_new
-
-        self.log_ai_decision("Get News Articles", reasoning, None)
+        self.log_ai_decision("Get News Articles", 'Initial article retrieval', reasoning, None)
         return articles_object
 
     def ai_categorize_incident(self, search_result: Dict) -> tuple[BreachCategory, str]:
@@ -440,6 +467,8 @@ class TrueAIBreachAgent:
             - HOSPITAL: Direct hospital/health system incidents
             - MEDICAL: Other medical/healthcare related (clinics, medical devices, etc.)
             - BUSINESS: Non-healthcare business incidents (but relevant for threat intelligence)
+            
+            Only assign an article to the HOSPITAL category if the company that was breached is specifically called a hospital in the article. 
             
             For healthcare cybersecurity professionals, consider:
             - PHI/medical data involvement
@@ -469,7 +498,7 @@ class TrueAIBreachAgent:
                 category = BreachCategory.BUSINESS
                 reasoning += f" (Note: AI returned '{category_str}', defaulted to BUSINESS)"
 
-            self.log_ai_decision("Incident Categorization", reasoning, category.value)
+            self.log_ai_decision("Incident Categorization", search_result['title'], reasoning, category.value)
             return category, reasoning
 
     def ai_assess_severity(self, search_result: Dict, category: BreachCategory) -> tuple[SeverityLevel, int, str]:
@@ -530,7 +559,7 @@ class TrueAIBreachAgent:
         except:
             affected_count = 0
 
-        self.log_ai_decision(f"{search_result['title']} Severity Assessment", reasoning, f"{severity.value}/{affected_count}")
+        self.log_ai_decision(f"{search_result['title']} Severity Assessment", search_result['title'], reasoning, f"{severity.value}/{affected_count}")
         return severity, affected_count, reasoning
 
     def ai_extract_technical_details(self, search_result: Dict, category: BreachCategory) -> tuple[List[str], str]:
@@ -587,7 +616,7 @@ class TrueAIBreachAgent:
             if line.startswith('-') or line.startswith('•'):
                 details.append(line[1:].strip())
 
-        self.log_ai_decision("Technical Detail Extraction", reasoning, f"{len(details)} details extracted")
+        self.log_ai_decision("Technical Detail Extraction", search_result['title'], reasoning, f"{len(details)} details extracted")
         return details, reasoning
 
     def ai_prioritize_incidents(self, incidents: List[BreachIncident]) -> tuple[List[BreachIncident], str]:
@@ -647,7 +676,7 @@ class TrueAIBreachAgent:
             prioritized_incidents = incidents
             reasoning += " (Note: Used fallback prioritization due to parsing error)"
 
-        self.log_ai_decision("Incident Prioritization", reasoning, f"Reordered {len(incidents)} incidents")
+        self.log_ai_decision("Incident Prioritization", "Prioritize Incidents", reasoning, f"Reordered {len(incidents)} incidents")
         return prioritized_incidents, reasoning
 
     def ai_generate_email_format(self, incidents: List[BreachIncident]) -> tuple[str, str]:
@@ -719,12 +748,14 @@ class TrueAIBreachAgent:
 
         ai_response_object = call_perplexity_api(format_prompt, AI_MODEL_ALL)
         ai_response_message = ai_response_object["choices"][0]["message"]["content"]
-        clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
+        html_match = re.search(r'HTML:\s*```html\s*(.*?)\s*```', ai_response_message, re.DOTALL)
+        if html_match:
+            clean_string = html_match.group(1).strip()
 
         strategy_reasoning = "AI determined optimal visual hierarchy with healthcare-specific iconography and severity color coding for rapid threat assessment by busy cybersecurity professionals."
 
-        self.log_ai_decision("Email Format Generation", strategy_reasoning, f"Generated {len(clean_string)} character HTML")
-        return ai_response_message, strategy_reasoning
+        self.log_ai_decision("Email Format Generation", "Generate Email Format", strategy_reasoning, f"Generated {len(clean_string)} character HTML")
+        return clean_string, strategy_reasoning
 
     def run_ai_agent(self) -> Dict[str, Any]:
         """
@@ -750,12 +781,11 @@ class TrueAIBreachAgent:
                 source=result["source"],
                 url=result["url"],
                 summary=result["summary"],
-                details='',
                 full_text_of_article = result["full_text_of_article"],
                 number_of_records_breached = result["number_of_records_breached"],
                 names_of_threat_actors = result["names_of_threat_actors"],
-                publish_date=datetime.now().strftime("%Y-%m-%d"),
-                ai_reasoning=f"{cat_reasoning} | {sev_reasoning}"
+                publish_date= '',
+                ai_reasoning = ''
             )
 
             processed_incidents.append(incident)
@@ -768,27 +798,25 @@ class TrueAIBreachAgent:
 
         # Final AI summary
         summary_prompt = f"""
-        Summarize the AI agent's performance in this cybersecurity intelligence gathering session:
+        Summarize the AI agent's performance in this cybersecurity intelligence gathering session. 
+        For each value of 'title', and within that for each value of 'decision_type', summarize the 'ai_reasoning'
         
-        - Incidents processed: {len(processed_incidents)}
-        - Decisions made: {len(self.decision_log)}
-        - Decision types: {list(set(log['decision_type'] for log in self.decision_log))}
+        Here is the data to be summarized: {json.dumps(self.decision_log, indent=2)}
         
-        Provide a brief executive summary of what the AI agent accomplished.
+        Provide the results in html format with a nice report format.
         """
 
         ai_response_object = call_perplexity_api(summary_prompt, AI_MODEL_ALL)
         ai_response_message = ai_response_object["choices"][0]["message"]["content"]
-        clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
-
-        self.log_ai_decision("Final AI Summary", clean_string, "COMPLETED")
+        self.log_ai_decision("Final AI Summary", 'Wrap-Up', ai_response_message, "COMPLETED")
 
         return {
+            "summary_of_ai_decisions": ai_response_message,
             "incidents_found": len(search_results),
             "incidents_processed": prioritized_incidents,
             "email_html": email_html,
             "decision_log": self.decision_log,
-            "ai_summary": clean_string,
+            "ai_summary": '',
             "total_ai_decisions": len(self.decision_log)
         }
 
@@ -813,26 +841,13 @@ def startAI_Agent():
     print(f"AI decisions made: {results['total_ai_decisions']}")
     print(f"AI summary: {results['ai_summary']}")
 
-    file_path = settings.BASE_DIR / 'output' / 'reasoning.md'
+    file_path = settings.BASE_DIR / 'output' / 'reasoning.html'
     with open(file_path, "w", encoding="utf-8") as f:
         f.write('AI Agent Reasoning')
 
-    print(f"\n🧠 AI DECISION LOG:")
-    for i, log_entry in enumerate(results['decision_log'], 1):
-        print(f"\n[{log_entry['timestamp']}] AI Decision #{i}: {log_entry['decision_type']}")
-        try:
-            print(f"    🤖 AI Reasoning: {log_entry['ai_reasoning'][:150]}...")
-        except Exception as e:
-            print("Couldn't print a log entry: ", log_entry)
-        if log_entry['outcome']:
-            print(f"    ✅ Outcome: {log_entry['outcome']}")
-
-        with open(file_path, "a", encoding="utf-8") as f:
-            f.write(f"\n[{log_entry['timestamp']}] AI Decision #{i}: {log_entry['decision_type']}")
-            f.write(f"\n - {log_entry['ai_reasoning']}")
-            if log_entry['outcome']:
-                print(f"\n - Outcome: {log_entry['outcome']}")
-            f.write(f"\n-----\n\n")
+    file_path = settings.BASE_DIR / 'output' / 'summary_of_ai_decisions.html'
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(results['summary_of_ai_decisions'])
 
     print(f"\n📧 AI-GENERATED EMAIL HTML:")
     print("HTML email ready for delivery (length:", len(results['email_html']), "characters)")
