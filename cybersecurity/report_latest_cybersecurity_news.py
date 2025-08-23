@@ -123,7 +123,10 @@ def call_perplexity_api(prompt: str, model: str):
     try:
         result = response.json()
     except Exception as e:
-        print('call_perplexity_api: ', e)
+        print('call_perplexity_api: ', e, 'status code: ', response.status_code)
+        if response.status_code == 401:
+            print('Need to top off perplexity account funds')
+        breakpoint()
 
     try:
         input_tokens = result['usage']['prompt_tokens']
@@ -147,9 +150,29 @@ import requests # Make sure you have this import at the top of your file
 
 def link_returns_status_200(url):
     result = False
-    response = requests.get(url)
-    if response.status_code == 200:
-        result = True
+    try:
+        # via gemini:
+        # Q: I've got a url that when I put it in the browser, it loads just fine. But when I test it like this, I get a 403 response. How can that be?
+        #    response = requests.get(url)
+        #
+        # A: That discrepancy occurs because your browser and the requests library send different information in their web requests. Websites often use this information to distinguish between human users and automated scripts.
+        # A 403 Forbidden error means the server understood your request but is refusing to authorize it. In this case, the website's anti-bot or security measures likely detected your Python script and blocked it, while your browser request was seen as legitimate.
+
+        #gemini recommends trying these headers:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
+        }
+
+        # Add headers to the GET request
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            result = True
+    except Exception as e:
+        pass;
+
     return result
 
 
@@ -192,9 +215,11 @@ def confirm_article_url(article, today_str):
     got_our_data = False
     while not got_our_data and retry_count < MAX_RETRY_ATTEMPTS:
         python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
-        article_string = python_object["choices"][0]["message"]["content"]
-        clean_json = article_string.strip().removeprefix('```json').removesuffix('```').strip()
         try:
+            if python_object is None:
+                continue
+            article_string = python_object["choices"][0]["message"]["content"]
+            clean_json = article_string.strip().removeprefix('```json').removesuffix('```').strip()
             article_new =json.loads(clean_json)
 
             #confirm url is not a 404
@@ -519,11 +544,12 @@ class TrueAIBreachAgent:
         Source: {search_result['source']}
         
         Consider for severity assessment:
+        - Healthcare-specific factors (PHI, HIPAA, patient safety, care disruption)
+        - Relevance to hospital cybersecurity
         - Regulatory implications
         - Operational impact
-        - Attack sophistication
         - Number of people affected (extract from content)
-        - Healthcare-specific factors (PHI, HIPAA, patient safety, care disruption)
+        - Attack sophistication
         - Type of data compromised
         
         Severity levels:
@@ -640,10 +666,12 @@ class TrueAIBreachAgent:
         3. Emerging threat patterns that could affect healthcare
         
         Determine the optimal order for presenting these incidents. Consider:
-        - Immediate relevance to healthcare industry
-        - Severity and scale of impact  
-        - Learning value for healthcare cybersecurity teams
-        - Urgency of response needed
+        - Incidents with the category HOSPITAL have the highest priority
+        - Incidents with the category MEDIAL have the second-highest priority
+        - Incidents with the category BUSINESS have the third-highest priority
+        - Within each category, prioritize items in order of the following:
+        -- Severity and scale of impact  
+        -- Urgency of response needed
         
         Provide the optimal order (by incident number) and explain your prioritization reasoning.
         
@@ -731,11 +759,12 @@ class TrueAIBreachAgent:
         
         Make sure to put breach_category on its own separate line
     
-        For each article, include the following:
+        For each article, MAKE SURE TO INCLUDE EACH OF THE FOLLOWING:
         - Title
         - Summary
         - breach_category
-        - date
+        - publish_date
+        - severity
         - Clicking the article title should take us to the url of the source
         - Number of records breached (if that is known)
         - Names of the potential threat actors (if that is known)
