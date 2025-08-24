@@ -35,36 +35,31 @@ class NewsItem:
     full_text_of_article: str
     number_of_records_breached: str
     names_of_threat_actors: str
+from dateutil import parser
 
-def convert_date_format(date_string):
+def regularize_date_format(date_string):
     """
     Convert various date formats to 'Aug 23, 2025' format.
 
-    Handles:
+    Handles virtually any date format using dateutil parser.
+    Examples:
     - "August 23, 2025 00:00 UTC"
     - "2025-08-23"
+    - "2025-08-24T14:14:00Z"
+    - "Aug 24, 2025"
+    - "24/08/2025"
+    - And many more...
     """
     # Strip whitespace
     date_string = date_string.strip()
 
-    # Try parsing "August 23, 2025 00:00 UTC" format
     try:
-        # Remove the time and timezone part if present
-        date_part = re.sub(r'\s+\d{2}:\d{2}\s+UTC$', '', date_string)
-        parsed_date = datetime.strptime(date_part, "%B %d, %Y")
+        # Use dateutil parser to handle any date format
+        parsed_date = parser.parse(date_string)
         return parsed_date.strftime("%b %d, %Y")
-    except ValueError:
-        pass
-
-    # Try parsing "2025-08-23" format
-    try:
-        parsed_date = datetime.strptime(date_string, "%Y-%m-%d")
-        return parsed_date.strftime("%b %d, %Y")
-    except ValueError:
-        pass
-
-    # If no format matches, return original date_string
-    return date_string
+    except (ValueError, parser.ParserError):
+        # If parsing fails, return original date_string
+        return date_string
 
 
 def call_gemini_api(prompt, model_specifier = ''):
@@ -241,7 +236,7 @@ def confirm_article_url(article, today_str):
     """
 
     retry_count = 0
-    MAX_RETRY_ATTEMPTS = 5
+    MAX_RETRY_ATTEMPTS = 3
     got_our_data = False
     while not got_our_data and retry_count < MAX_RETRY_ATTEMPTS:
         python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
@@ -449,48 +444,63 @@ class TrueAIBreachAgent:
         logging.info(f"AI AGENT DECISION: {decision_type} - {ai_reasoning}")
 
     def get_news_from_llm(self) -> List[NewsItem]:
-        """Get news from Perplexity API"""
+        """Retrieve today's cybersecurity breach news using Gemini or Perplexity responses."""
         today_str = datetime.now().strftime("%B %d, %Y")
 
-        prompt = f"""Retrieve all unique news stories published today about companies that experienced a cybersecurity breach.
-    
-                        If there are no news stories today, reply "No news today".
-                        
-                        Perform a thorough search, reviewing multiple reputable sources to ensure completeness.
-                        
-                        Do not omit any relevant stories found.
-                        
-                        Return results as a JSON array. 
-                        For each article, MAKE SURE TO INCLUDE EACH OF THE FOLLOWING:
-                        
-                        - title
-                        - url
-                        - source
-                        - summary
-                        - publish_date
-                        - full_text_of_article
-                        - number_of_records_breached (if unknown, put "unknown")
-                        - names_of_threat_actors (if unknown, put "unknown")
-                        
-                        For multiple news articles about the same breach at the same company, include only the most comprehensive or earliest story in your results.
-                        
-                        Maximum of 30 unique companies (breaches). List up to one story per company or breach.
-                        
-                        To ensure consistency across runs:
-                        
-                        Always use the same date range: ["{today_str} 00:00" to "{today_str} 23:59" UTC].
-                        
-                        Consistently define a "unique" breach as one where the affected company and incident are distinct.
-                        
-                        Sort the stories in the same, deterministic way (e.g., alphabetical order by company name or by published time descending).
-                        
-                        Ensure stories are not omitted due to deduplication.
-                        
-                        Return only the formatted JSON.
+        prompt = f"""I'm using the Google Gemini api to retrieve unique news stories.
+            You are a specialized AI assistant for news retrieval with a single purpose: to find and report on cybersecurity breaches that were published today.
+            
+            **Your process must be as follows:**
+            
+            1.  **Initial Search (Hospitals & Medical Companies):**
+                * Perform a series of broad and specific Google Searches to find news stories published today about cybersecurity breaches involving hospitals, medical companies, and healthcare providers.
+                * Example search queries (you must use these as a starting point, but can and should generate more):
+                    * "hospital data breach today"
+                    * "medical company cyberattack today"
+                    * "healthcare cybersecurity breach [today's date]"
+            
+            2.  **Second Search (All Other Companies):**
+                * Conduct a separate, extensive series of Google Searches for any other companies that have experienced a cybersecurity breach today.
+                * Example search queries (you must use these as a starting point, but can and should generate more):
+                    * "company data breach today"
+                    * "cyberattack on [company type e.g., 'financial institution'] today"
+                    * "hacked today"
+            
+            3.  **Data Extraction & Filtering:**
+                * Review all articles found in both searches.
+                * Identify and extract all unique news stories about a distinct cybersecurity breach.
+                * A "unique" breach is one where the affected company and the incident are distinct.
+                * If multiple articles cover the same unique breach, select only one. Prioritize the most detailed article or the one from the most reputable news source.
+            
+            4.  **Structured Output Generation:**
+                * If no relevant news stories are found, return the exact string "No news today".
+                * If stories are found, compile them into a JSON array.
+                * For each story, ensure the following keys are present and populated. If a value is not available in the article, use the string "unknown".
+                    * `title` (string)
+                    * `url` (string)
+                    * `source` (string)
+                    * `summary` (string - a concise, 2-3 sentence summary)
+                    * `publish_date` (string - format YYYY-MM-DD)
+                    * `full_text_of_article` (string - the complete, unedited text of the article)
+                    * `number_of_records_breached` (string or integer)
+                    * `names_of_threat_actors` (string or array of strings)
+                * The final JSON array should contain a maximum of 30 unique companies/breaches.
+                * The final JSON array must be sorted alphabetically by company name.
+                * Return the reasoning and the formatted JSON . Put the reasoning inside a single <think></think> tag.
+            
+            **Constraints:**
+            * Today's date is {today_str}.
+            * Search date range: {today_str} 00:00 UTC to {today_str} 23:59 UTC.
+            * Ensure all relevant stories are included and none are omitted due to incorrect deduplication.
         """
 
         python_object = call_gemini_api(prompt, AI_MODEL_ALL)
 
+        reasoning = None
+        articles_object = None
+        new_articles_object: List[dict] = []
+
+        # First try: Perplexity-style dict response
         try:
             # this works for objects returned by perplexity
             articles = python_object["choices"][0]["message"]["content"]
@@ -501,15 +511,27 @@ class TrueAIBreachAgent:
             reasoning, articles_object =  extract_reasoning_and_json(python_object.text)
             # google likes to provide vertexaisearch.cloud.google.com urls that redirect to the real url
             # let's get the real url
-            new_articles_object = []
+            today_str = regularize_date_format(today_str)
             for article in articles_object:
                 article_new = confirm_article_url(article, today_str)
-                if article_new is not None:
+                okay_to_add_this_article = article_new is not None
+                if okay_to_add_this_article:
+                    publish_date_of_this_article = article_new["publish_date"]
+                    publish_date_of_this_article = regularize_date_format(publish_date_of_this_article)
+                    if publish_date_of_this_article != today_str:
+                        okay_to_add_this_article = False
+                if okay_to_add_this_article:
                     new_articles_object.append(article_new)
                 else:
                     print(f"***Couldn't find a url for this one: {article['title']}")
 
-        self.log_ai_decision("Get News Articles", 'Initial article retrieval', reasoning, None)
+        # Persist raw JSON for inspection
+        file_path = settings.BASE_DIR / 'output' / 'articles_raw_json.json'
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(new_articles_object, indent=2))
+
+        self.log_ai_decision("Get News Articles", 'Initial article retrieval', reasoning or 'N/A', None)
+        print('Total articles retrieved: {}'.format(len(new_articles_object)))
         return new_articles_object
 
     def ai_categorize_incident(self, search_result: Dict) -> tuple[BreachCategory, str]:
@@ -760,7 +782,7 @@ class TrueAIBreachAgent:
                 "source": incident.source,
                 "severity": incident.severity,
                 "url": incident.url,
-                "publish_date": convert_date_format(incident.publish_date),
+                "publish_date": regularize_date_format(incident.publish_date),
                 "names_of_potential_threat_actors": incident.names_of_threat_actors,
                 "number_of_records_breached": incident.number_of_records_breached
             })
@@ -793,7 +815,7 @@ class TrueAIBreachAgent:
         
         For breach_category, use these highlight colors:
         - Hospital: white text on green rounded rect
-        - Medical:  white text on light green rounded rect
+        - Medical:  white text on #008080 rounded rect
         - Business: white text on #3965bc rounded rect
         
         Make sure to put breach_category on its own separate line
@@ -869,13 +891,116 @@ class TrueAIBreachAgent:
         Summarize the AI agent's performance in this cybersecurity intelligence gathering session. 
         For each value of 'title', and within that for each value of 'decision_type', summarize the 'ai_reasoning'
         
+        Use this HTML for the email:
+        
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>AI Agent Performance Summary – Cybersecurity Intelligence Gathering Session</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; background: #f7f7fa; color: #222; margin: 0; padding: 0; }}
+                .container {{ max-width: 900px; margin: 40px auto; background: #fff; padding: 32px 36px 36px 36px; border-radius: 10px; box-shadow: 0 2px 10px rgba(60,60,80,0.10);}}
+                h1 {{ color: #294166; margin-bottom: 0.5em; }}
+                h2 {{ color: #45649b; margin-top: 2em; }}
+                h3 {{ color: #20507c; margin-top: 1.5em; }}
+                .subheader {{ color: #4a7eb5; margin-bottom: 1.2em; font-size: 1.15em; }}
+                .section {{ margin-bottom: 2.5em; }}
+                table {{ width: 100%; border-collapse: collapse; margin: 1em 0; }}
+                th, td {{ border: 1px solid #e1e1e1; padding: 10px 8px; }}
+                th {{ background: #e3eaf4; text-align: left; }}
+                .tag {{ display: inline-block; padding: 2px 10px; border-radius: 7px; font-size: 0.92em; margin-right: 6px;}}
+                .tag-init {{ background: #d9e7fd; color: #374b68; }}
+                .tag-severity {{ background: #f8e3a3; color: #b37b00; }}
+                .tag-business {{ background: #e7f7ea; color: #246442; }}
+                .tag-medium {{ background: #ffe5b7; color: #a8740a; }}
+                .tag-priority {{ background: #e1eafd; color: #224c82; }}
+                .tag-email {{ background: #f4e7f7; color: #8653a3; }}
+                .highlight {{ background: #fff8d4; }}
+                .severity-high {{ color: #d2173f; }}
+                .severity-medium {{ color: #b37b00; }}
+                .severity-low {{ color: #246442; }}
+                code {{ background: #f0f2f6; padding: 1px 6px; border-radius: 3px; }}
+            </style>
+        </head>
+        <body>
+        <div class="container">
+            <h1>AI Agent Performance Summary</h1>
+            <div class="subheader">
+                <strong>Session Scope:</strong> Automated cybersecurity intelligence gathering, incident categorization, severity assessment, and prioritization for the healthcare sector.<br>
+                <strong>Date:</strong> <!-- Insert report date here -->
+            </div>
+        
+            <div class="section">
+                <h2>Session Initialization</h2>
+                <table>
+                    <tr>
+                        <th>Decision Type</th>
+                        <th>AI Reasoning</th>
+                    </tr>
+                    <!-- Insert session initialization rows here -->
+                </table>
+            </div>
+        
+            <div class="section">
+                <h2>Incident Analysis & Reasoning Details</h2>
+                <!-- For each incident, repeat this block -->
+                <h3><!-- Insert Incident Headline Here --></h3>
+                <table>
+                    <tr>
+                        <th>Decision Type</th>
+                        <th>AI Reasoning</th>
+                    </tr>
+                    <!-- Insert analysis/categorization and severity assessment rows here -->
+                    <!-- For the severity assessment rows, summarize them by each of these categories: 
+                        - Regulatory
+                        - Operational
+                        - Attack sophistication
+                        - Scale
+                        - Healthcare factors
+                        - Compromised Data
+                        ... and put each category in a separate bullet point. Boldface the name of the category.
+                    -->
+                    <-- Under the list of bullet points, state the severity category (HIGH/MEDIUM/LOW), and sum up the reasons for that in a single sentence. -->
+                    
+                    
+                </table>
+            </div>
+        
+            <div class="section">
+                <h2>Incident Prioritization</h2>
+                <table>
+                    <tr>
+                        <th>Order</th>
+                        <th>Incident</th> 
+                        <th>AI Reasoning for Priority</th>
+                    </tr>
+                    <!-- Insert prioritization rows here -->
+                </table>
+            </div>
+        
+            <div class="section">
+                <h2>Email Format Generation</h2>
+                <table>
+                    <tr>
+                        <th>Decision Type</th>
+                        <th>AI Reasoning</th>
+                    </tr>
+                    <!-- Insert email format generation row(s) here -->
+                </table>
+            </div>
+        </div>
+        </body>
+        </html>
+
         Here is the data to be summarized: {json.dumps(self.decision_log, indent=2)}
         
-        Provide the results in html format with a nice report format.
+        Provide the results in html format. Return only the html.
         """
 
         ai_response_object = call_perplexity_api(summary_prompt, AI_MODEL_ALL)
         ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        ai_response_message.replace("```html", "").replace("```", "")
         self.log_ai_decision("Final AI Summary", 'Wrap-Up', ai_response_message, "COMPLETED")
 
         return {
