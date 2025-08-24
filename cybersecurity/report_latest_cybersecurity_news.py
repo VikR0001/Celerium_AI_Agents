@@ -31,10 +31,40 @@ class NewsItem:
     url: str
     source: str
     summary: str
-    published_date: str
+    publish_date: str
     full_text_of_article: str
     number_of_records_breached: str
     names_of_threat_actors: str
+
+def convert_date_format(date_string):
+    """
+    Convert various date formats to 'Aug 23, 2025' format.
+
+    Handles:
+    - "August 23, 2025 00:00 UTC"
+    - "2025-08-23"
+    """
+    # Strip whitespace
+    date_string = date_string.strip()
+
+    # Try parsing "August 23, 2025 00:00 UTC" format
+    try:
+        # Remove the time and timezone part if present
+        date_part = re.sub(r'\s+\d{2}:\d{2}\s+UTC$', '', date_string)
+        parsed_date = datetime.strptime(date_part, "%B %d, %Y")
+        return parsed_date.strftime("%b %d, %Y")
+    except ValueError:
+        pass
+
+    # Try parsing "2025-08-23" format
+    try:
+        parsed_date = datetime.strptime(date_string, "%Y-%m-%d")
+        return parsed_date.strftime("%b %d, %Y")
+    except ValueError:
+        pass
+
+    # If no format matches, return original date_string
+    return date_string
 
 
 def call_gemini_api(prompt, model_specifier = ''):
@@ -204,7 +234,7 @@ def confirm_article_url(article, today_str):
         - url
         - source
         - summary
-        - published_date
+        - publish_date
         - full_text_of_article
         - number_of_records_breached (if unknown, put "unknown")
         - names_of_threat_actors (if unknown, put "unknown")
@@ -235,7 +265,10 @@ def confirm_article_url(article, today_str):
             retry_count += 1
             got_our_data = False
 
-    return article_new[0]
+    try:
+        return article_new[0]
+    except Exception as e:
+        return None
 
 
     # I tried doing it this way but a lot of the time it gave me a wrong url
@@ -427,13 +460,14 @@ class TrueAIBreachAgent:
                         
                         Do not omit any relevant stories found.
                         
-                        Return results as a JSON array. For each story, include:
+                        Return results as a JSON array. 
+                        For each article, MAKE SURE TO INCLUDE EACH OF THE FOLLOWING:
                         
                         - title
                         - url
                         - source
                         - summary
-                        - published_date
+                        - publish_date
                         - full_text_of_article
                         - number_of_records_breached (if unknown, put "unknown")
                         - names_of_threat_actors (if unknown, put "unknown")
@@ -467,13 +501,16 @@ class TrueAIBreachAgent:
             reasoning, articles_object =  extract_reasoning_and_json(python_object.text)
             # google likes to provide vertexaisearch.cloud.google.com urls that redirect to the real url
             # let's get the real url
-            for idx, article in enumerate(articles_object):
-                url = article['url']
+            new_articles_object = []
+            for article in articles_object:
                 article_new = confirm_article_url(article, today_str)
-                articles_object[idx] = article_new
+                if article_new is not None:
+                    new_articles_object.append(article_new)
+                else:
+                    print(f"***Couldn't find a url for this one: {article['title']}")
 
         self.log_ai_decision("Get News Articles", 'Initial article retrieval', reasoning, None)
-        return articles_object
+        return new_articles_object
 
     def ai_categorize_incident(self, search_result: Dict) -> tuple[BreachCategory, str]:
             """
@@ -544,17 +581,18 @@ class TrueAIBreachAgent:
         Source: {search_result['source']}
         
         Consider for severity assessment:
+        - Number of records breached (extract from content)
+        - Number of people affected (extract from content)
         - Healthcare-specific factors (PHI, HIPAA, patient safety, care disruption)
         - Relevance to hospital cybersecurity
         - Regulatory implications
         - Operational impact
-        - Number of people affected (extract from content)
         - Attack sophistication
         - Type of data compromised
         
         Severity levels:
-        - HIGH: Major incidents requiring immediate attention
-        - MEDIUM: Significant incidents requiring monitoring  
+        - HIGH: Major incidents with many records breached
+        - MEDIUM: Significant incidents with records breached
         - LOW: Minor incidents for awareness
         
         Respond in this format:
@@ -670,7 +708,8 @@ class TrueAIBreachAgent:
         - Incidents with the category MEDIAL have the second-highest priority
         - Incidents with the category BUSINESS have the third-highest priority
         - Within each category, prioritize items in order of the following:
-        -- Severity and scale of impact  
+        -- Number of records breached
+        -- Number of people affected
         -- Urgency of response needed
         
         Provide the optimal order (by incident number) and explain your prioritization reasoning.
@@ -721,7 +760,7 @@ class TrueAIBreachAgent:
                 "source": incident.source,
                 "severity": incident.severity,
                 "url": incident.url,
-                "date": incident.publish_date,
+                "publish_date": convert_date_format(incident.publish_date),
                 "names_of_potential_threat_actors": incident.names_of_threat_actors,
                 "number_of_records_breached": incident.number_of_records_breached
             })
@@ -813,7 +852,7 @@ class TrueAIBreachAgent:
                 full_text_of_article = result["full_text_of_article"],
                 number_of_records_breached = result["number_of_records_breached"],
                 names_of_threat_actors = result["names_of_threat_actors"],
-                publish_date= '',
+                publish_date= result['publish_date'],
                 ai_reasoning = ''
             )
 
