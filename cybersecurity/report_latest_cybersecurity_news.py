@@ -150,8 +150,8 @@ def call_perplexity_api(prompt: str, model: str):
     except Exception as e:
         print('call_perplexity_api: ', e, 'status code: ', response.status_code)
         if response.status_code == 401:
-            print('Need to top off perplexity account funds')
-        breakpoint()
+            print('May need to top off perplexity account funds. Buy more at https://www.perplexity.ai/account/api/billing')
+            breakpoint()
 
     try:
         input_tokens = result['usage']['prompt_tokens']
@@ -170,8 +170,10 @@ def call_perplexity_api(prompt: str, model: str):
 
     return result
 
-import os
-import requests # Make sure you have this import at the top of your file
+def remove_duplicate_titles(articles):
+    seen = set()
+    return [article for article in articles
+            if article['title'] not in seen and not seen.add(article['title'])]
 
 def link_returns_status_200(url):
     result = False
@@ -205,8 +207,12 @@ def confirm_article_url(article, today_str):
 
     # some of these vertex article_urls resolve to the real article
     if 'vertex' in article['url']:
-        final_url = requests.head(article['url'], allow_redirects=True).url
-        article['url'] = final_url
+        try:
+            final_url = requests.head(article['url'], allow_redirects=True).url
+            article['url'] = final_url
+            got_final_url = True
+        except Exception as e:
+            pass #sometimes requests throws a max retries error, meaning it couldn't resolve the url
 
     final_url = article['url']
     if link_returns_status_200(final_url):
@@ -486,7 +492,7 @@ class TrueAIBreachAgent:
                     * `names_of_threat_actors` (string or array of strings)
                 * The final JSON array should contain a maximum of 30 unique companies/breaches.
                 * The final JSON array must be sorted alphabetically by company name.
-                * Return the reasoning and the formatted JSON . Put the reasoning inside a single <think></think> tag.
+                * Return the reasoning and the formatted JSON . Put the reasoning inside a single <think></think> tag. Include in the reasoning how publish_date was determined.
             
             **Constraints:**
             * Today's date is {today_str}.
@@ -512,6 +518,10 @@ class TrueAIBreachAgent:
             # google likes to provide vertexaisearch.cloud.google.com urls that redirect to the real url
             # let's get the real url
             today_str = regularize_date_format(today_str)
+            if articles_object is None:
+                #no articles found
+                breakpoint()
+
             for article in articles_object:
                 article_new = confirm_article_url(article, today_str)
                 okay_to_add_this_article = article_new is not None
@@ -523,7 +533,9 @@ class TrueAIBreachAgent:
                 if okay_to_add_this_article:
                     new_articles_object.append(article_new)
                 else:
-                    print(f"***Couldn't find a url for this one: {article['title']}")
+                    print(f"***Couldn't find a url and/or a date for this one: {article['title']}")
+
+        new_articles_object = remove_duplicate_titles(new_articles_object)
 
         # Persist raw JSON for inspection
         file_path = settings.BASE_DIR / 'output' / 'articles_raw_json.json'
@@ -621,6 +633,8 @@ class TrueAIBreachAgent:
         Severity: [HIGH/MEDIUM/LOW]
         Affected Count: [number]
         Reasoning: [Your detailed severity analysis considering all factors]
+        
+        If an article duplicates an article that has a higher priority, include this text in the reasoning: "DUPLICATE ARTICLE"
         """
 
         ai_response_object = call_perplexity_api(severity_prompt, AI_MODEL_ALL)
