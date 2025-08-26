@@ -1048,10 +1048,6 @@ def startAI_Agent():
     print(f"AI decisions made: {results['total_ai_decisions']}")
     print(f"AI summary: {results['ai_summary']}")
 
-    file_path = settings.BASE_DIR / 'output' / 'reasoning.html'
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write('AI Agent Reasoning')
-
     file_path = settings.BASE_DIR / 'output' / 'summary_of_ai_decisions.html'
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(results['summary_of_ai_decisions'])

@@ -54,6 +54,12 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+EMAIL_HOST = 'smtp.office365.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'vrubenfeld@celerium.com'
+EMAIL_HOST_PASSWORD = 'your-password'
+
 ROOT_URLCONF = 'Celerium_AI_Agents.urls'
 
 TEMPLATES = [
