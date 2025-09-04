@@ -244,32 +244,30 @@ def confirm_article_url(article, today_str):
     retry_count = 0
     MAX_RETRY_ATTEMPTS = 3
     got_our_data = False
-    while not got_our_data and retry_count < MAX_RETRY_ATTEMPTS:
-        python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
+    python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
+    if python_object is not None:
         try:
-            if python_object is None:
-                continue
+            urls_provided = python_object['citations']
+
             article_string = python_object["choices"][0]["message"]["content"]
-            clean_json = article_string.strip().removeprefix('```json').removesuffix('```').strip()
-            article_new =json.loads(clean_json)
+            reasoning, article_new = extract_reasoning_and_json(article_string)
 
-            #confirm url is not a 404
-            try:
-                url = article_new["url"]
-            except Exception as e:
-                url =  article_new[0]['url']
+            if article_new is not None:
+                article_new = article_new[0]
+                url = article_new['url']
+                if link_returns_status_200(url):
+                    return article_new
 
-            if link_returns_status_200(url):
-                got_our_data = True
+            for url in urls_provided:
+                #confirm url is not a 404
+                if link_returns_status_200(url):
+                    got_our_data = True
+                    article_new['url'] = url
+                    break
         except Exception as e:
             print('confirm_article_url: ', e)
-            retry_count += 1
-            got_our_data = False
 
-    try:
-        return article_new[0]
-    except Exception as e:
-        return None
+        return article_new
 
 
     # I tried doing it this way but a lot of the time it gave me a wrong url
@@ -321,14 +319,33 @@ def extract_reasoning_and_json(text):
     Extracts content inside <think>...</think> to 'reasoning',
     and first JSON array inside triple backticks (``````) to 'response_object'.
     """
-    # Extract everything inside <think>...</think>
-    reasoning_match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
-    reasoning = reasoning_match.group(1).strip() if reasoning_match else None
+    response_object = None
 
-    # Extract the JSON block between ``````
-    pattern = r'```json\s*(.*?)(?:```|$)'
-    match = re.search(pattern, text, re.DOTALL)
-    response_object = json.loads(match.group(1).strip()) if match else None
+    #find start of json
+    search_string = '[\n  {\n    "'
+    position = text.find(search_string)
+    if position != -1:
+        reasoning = text[:position]
+        json_object_as_string = text[position:]
+
+        #sometimes the LLM returns anomalies. check for known anomalies
+        brackets = [(m.start(), m.group()) for m in re.finditer(r'[\[\]]', json_object_as_string)]
+        print("Last few brackets:", brackets[-10:])
+
+        # Try to find what comes after the first complete JSON structure
+        try:
+            # Parse incrementally to find where valid JSON ends
+            decoder = json.JSONDecoder()
+            obj, idx = decoder.raw_decode(json_object_as_string)
+            print(f"Valid JSON ends at character {idx}")
+            print("Extra content:", repr(json_object_as_string[idx:idx+100]))
+            json_object_as_string = json_object_as_string[0:idx]
+            response_object = json.loads(json_object_as_string)
+        except json.JSONDecodeError as e:
+            print("Decoder error:", e, "probably no news yet today")
+            breakpoint()
+    else:
+        print("Search string not found - probably exceeded Maximum output token limit: 65,536 as of 9-2025")
 
     return reasoning, response_object
 
@@ -476,7 +493,7 @@ class TrueAIBreachAgent:
                 * Review all articles found in both searches.
                 * Identify and extract all unique news stories about a distinct cybersecurity breach.
                 * A "unique" breach is one where the affected company and the incident are distinct.
-                * If multiple articles cover the same unique breach, select only one. Prioritize the most detailed article or the one from the most reputable news source.
+                * If multiple articles cover the same unique breach, select only one. Prioritize the article that includes details on threat actors and amount of data and/or records breached.
             
             4.  **Structured Output Generation:**
                 * If no relevant news stories are found, return the exact string "No news today".
@@ -487,10 +504,10 @@ class TrueAIBreachAgent:
                     * `source` (string)
                     * `summary` (string - a concise, 2-3 sentence summary)
                     * `publish_date` (string - format YYYY-MM-DD)
-                    * `full_text_of_article` (string - the complete, unedited text of the article)
+                    * `full_text_of_article` (string - capture the complete, unedited text of the article)
                     * `number_of_records_breached` (string or integer)
                     * `names_of_threat_actors` (string or array of strings)
-                * The final JSON array should contain a maximum of 30 unique companies/breaches.
+                * The final JSON array should contain a maximum of 15 unique companies/breaches.
                 * The final JSON array must be sorted alphabetically by company name.
                 * Return the reasoning and the formatted JSON . Put the reasoning inside a single <think></think> tag. Include in the reasoning how publish_date was determined.
             
@@ -821,6 +838,7 @@ class TrueAIBreachAgent:
         - How should incidents be visually differentiated?
         - What information should be most prominent?
         - What visual hierarchy works best for busy executives?
+        - How to make sure the HTML will work in an email?
         
         Provide your formatting strategy and reasoning, then generate the HTML.
         
@@ -949,7 +967,7 @@ class TrueAIBreachAgent:
                 <h2>Session Initialization</h2>
                 <table>
                     <tr>
-                        <th>Decision Type</th>
+                        <th width="128">Decision Type</th>
                         <th>AI Reasoning</th>
                     </tr>
                     <!-- Insert session initialization rows here -->
@@ -962,7 +980,7 @@ class TrueAIBreachAgent:
                 <h3><!-- Insert Incident Headline Here --></h3>
                 <table>
                     <tr>
-                        <th>Decision Type</th>
+                        <th width="128">Decision Type</th>
                         <th>AI Reasoning</th>
                     </tr>
                     <!-- Insert analysis/categorization and severity assessment rows here -->
@@ -985,7 +1003,7 @@ class TrueAIBreachAgent:
                 <h2>Incident Prioritization</h2>
                 <table>
                     <tr>
-                        <th>Order</th>
+                        <th width="128">Order</th>
                         <th>Incident</th> 
                         <th>AI Reasoning for Priority</th>
                     </tr>
@@ -997,7 +1015,7 @@ class TrueAIBreachAgent:
                 <h2>Email Format Generation</h2>
                 <table>
                     <tr>
-                        <th>Decision Type</th>
+                        <th width="128">Decision Type</th>
                         <th>AI Reasoning</th>
                     </tr>
                     <!-- Insert email format generation row(s) here -->
