@@ -17,7 +17,7 @@ class Command(BaseCommand):
 
         self.stdout.write('Staring Agent...')
 
-        startAI_Agent()
+        startAI_Agent(gather_articles_only=False)
 
         try:
             # Report generation logic will go here

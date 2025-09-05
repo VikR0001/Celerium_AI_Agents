@@ -2,7 +2,6 @@
 Cybersecurity Breach News AI Agent
 This agent searches for cybersecurity breach news from today and sends email alerts.
 """
-import os
 import re
 from google import genai
 from google.genai import types
@@ -18,7 +17,12 @@ from typing import List, Dict, Any, Optional
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from django.db.models import F, OuterRef, Subquery
 from newspaper import Article
+
+from cybersecurity.analysis_settings import START_DATE, END_DATE
+from cybersecurity.embedding_utils import generate_article_embeddings, logger, recluster_all_articles
+from cybersecurity.models import NewsArticle
 
 total_cost = 0
 
@@ -37,7 +41,7 @@ class NewsItem:
     names_of_threat_actors: str
 from dateutil import parser
 
-def regularize_date_format(date_string):
+def regularize_date_format(date_input):
     """
     Convert various date formats to 'Aug 23, 2025' format.
 
@@ -50,16 +54,23 @@ def regularize_date_format(date_string):
     - "24/08/2025"
     - And many more...
     """
-    # Strip whitespace
-    date_string = date_string.strip()
 
     try:
-        # Use dateutil parser to handle any date format
-        parsed_date = parser.parse(date_string)
+        # Check if the input is already a datetime object
+        if isinstance(date_input, datetime):
+            parsed_date = date_input
+        else:
+            # If it's a string, strip whitespace and parse it
+            date_string = date_input.strip()
+            parsed_date = parser.parse(date_string)
+
+        # Format the datetime object into the desired string format
         return parsed_date.strftime("%b %d, %Y")
-    except (ValueError, parser.ParserError):
-        # If parsing fails, return original date_string
-        return date_string
+
+    except (ValueError, parser.ParserError, AttributeError):
+        # If parsing fails or the input is not a string or datetime object,
+        # return the original value.
+        return date_input
 
 
 def call_gemini_api(prompt, model_specifier = ''):
@@ -268,7 +279,6 @@ def confirm_article_url(article, today_str):
             print('confirm_article_url: ', e)
 
         return article_new
-
 
     # I tried doing it this way but a lot of the time it gave me a wrong url
     # e.g. something from the wrong date, or a link to a site in chines
@@ -518,6 +528,9 @@ class TrueAIBreachAgent:
         """
 
         python_object = call_gemini_api(prompt, AI_MODEL_ALL)
+        if python_object is None:
+            print('get_news_from_llm - No news stories found')
+            breakpoint()
 
         reasoning = None
         articles_object = None
@@ -564,12 +577,12 @@ class TrueAIBreachAgent:
         return new_articles_object
 
     def ai_categorize_incident(self, search_result: Dict) -> tuple[BreachCategory, str]:
-            """
-            AI DECISION POINT 2: Let AI analyze and categorize each incident
-            """
-            article_full_text = search_result['full_text_of_article']
+        """
+        AI DECISION POINT 2: Let AI analyze and categorize each incident
+        """
+        article_full_text = search_result.full_text_of_article
 
-            categorization_prompt = f"""
+        categorization_prompt = f"""
             You are a cybersecurity analyst specializing in healthcare industry threats.
             
             Analyze and categorize this cybersecurity incident:
@@ -594,25 +607,25 @@ class TrueAIBreachAgent:
             Reasoning: [Your detailed analysis of why this categorization is appropriate]
             """
 
-            ai_response_object = call_perplexity_api(categorization_prompt, AI_MODEL_ALL)
-            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
-            clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
+        ai_response_object = call_perplexity_api(categorization_prompt, AI_MODEL_ALL)
+        ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
 
-            parsed = self.llm.parse_structured_response(clean_string, ["Category", "Reasoning"])
+        parsed = self.llm.parse_structured_response(clean_string, ["Category", "Reasoning"])
 
-            category_str = parsed.get("category", "BUSINESS").upper()
-            reasoning = parsed.get("reasoning", "AI categorization reasoning not parsed correctly")
+        category_str = parsed.get("category", "BUSINESS").upper()
+        reasoning = parsed.get("reasoning", "AI categorization reasoning not parsed correctly")
 
-            if "medical" in category_str.lower():
-                a = 100
-            try:
-                category = BreachCategory(category_str.replace('*', '').lower())
-            except ValueError:
-                category = BreachCategory.BUSINESS
-                reasoning += f" (Note: AI returned '{category_str}', defaulted to BUSINESS)"
+        if "medical" in category_str.lower():
+            a = 100
+        try:
+            category = BreachCategory(category_str.replace('*', '').lower())
+        except ValueError:
+            category = BreachCategory.BUSINESS
+            reasoning += f" (Note: AI returned '{category_str}', defaulted to BUSINESS)"
 
-            self.log_ai_decision("Incident Categorization", search_result['title'], reasoning, category.value)
-            return category, reasoning
+        self.log_ai_decision("Incident Categorization", search_result.title, reasoning, category.value)
+        return category, reasoning
 
     def ai_assess_severity(self, search_result: Dict, category: BreachCategory) -> tuple[SeverityLevel, int, str]:
         """
@@ -626,10 +639,10 @@ class TrueAIBreachAgent:
         
         Assess the severity of this cybersecurity incident:
         
-        Title: {search_result['title']}
-        Content: {search_result['summary']}
+        Title: {search_result.title}
+        Content: {search_result.summary}
         Category: {category.value}
-        Source: {search_result['source']}
+        Source: {search_result.source}
         
         Consider for severity assessment:
         - Number of records breached (extract from content)
@@ -676,7 +689,7 @@ class TrueAIBreachAgent:
         except:
             affected_count = 0
 
-        self.log_ai_decision(f"{search_result['title']} Severity Assessment", search_result['title'], reasoning, f"{severity.value}/{affected_count}")
+        self.log_ai_decision(f"{search_result.title} Severity Assessment", search_result.title, reasoning, f"{severity.value}/{affected_count}")
         return severity, affected_count, reasoning
 
     def ai_extract_technical_details(self, search_result: Dict, category: BreachCategory) -> tuple[List[str], str]:
@@ -691,8 +704,8 @@ class TrueAIBreachAgent:
         
         Extract the most important technical details from this incident:
         
-        Title: {search_result['title']}
-        Content: {search_result['summary']}
+        Title: {search_result.title}
+        Content: {search_result.summary}
         Category: {category.value}
         Full Article: {search_result.get('full_content', 'Not available')}
         
@@ -879,38 +892,87 @@ class TrueAIBreachAgent:
         self.log_ai_decision("Email Format Generation", "Generate Email Format", strategy_reasoning, f"Generated {len(clean_string)} character HTML")
         return clean_string, strategy_reasoning
 
-    def run_ai_agent(self) -> Dict[str, Any]:
+    def run_ai_agent(self, gather_articles_only) -> Dict[str, Any]:
         """
         Execute the complete AI agent workflow where AI makes all decisions
         """
         self.log_ai_decision("AI Agent Initialization", "Starting true AI-driven cybersecurity breach analysis for healthcare industry", "STARTED")
 
         # AI Decision Pipeline - each step uses LLM calls
-        search_results = self.get_news_from_llm()
+
+        if gather_articles_only:
+            search_results = self.get_news_from_llm()
+            for result in search_results:
+                embedding_data = generate_article_embeddings(result)
+
+                # Create article with embeddings
+                incident, created = NewsArticle.objects.get_or_create(
+                    url=result["url"],
+                    defaults={
+                        'title': result["title"],
+                        'source': result["source"],
+                        'summary': result["summary"],
+                        'full_text_of_article': result["full_text_of_article"],
+                        'number_of_records_breached': result["number_of_records_breached"],
+                        'names_of_threat_actors': result["names_of_threat_actors"],
+                        'publish_date': result['publish_date'],
+                        # Add embeddings
+                        **embedding_data
+                    }
+                )
+
+                if created:
+                    logger.info(f"Created new article with embeddings: {incident.title}")
+                else:
+                    logger.info(f"Article already exists: {incident.title}")
+
+            recluster_all_articles()
+            return {
+                "summary_of_ai_decisions": "",
+                "incidents_found": len(search_results),
+                "incidents_processed": 0,
+                "email_html": 0,
+                "decision_log": self.decision_log,
+                "ai_summary": '',
+                "total_ai_decisions": len(self.decision_log)
+            }
+
 
         processed_incidents = []
-        for result in search_results:
+
+        articles = NewsArticle.objects.filter(
+            created_at__range=(START_DATE, END_DATE)
+        ).order_by('story_cluster_id', 'created_at')
+
+        story_cluster_ids = []
+        for result in articles:
+            if result.story_cluster_id in story_cluster_ids:
+                continue
+
+            story_cluster_ids.append(result.story_cluster_id)
+
             # Let AI make all the decisions for each incident
             category, cat_reasoning = self.ai_categorize_incident(result)
             severity, affected_count, sev_reasoning = self.ai_assess_severity(result, category)
             # details, det_reasoning = self.ai_extract_technical_details(result, category)
 
             incident = BreachIncident(
-                title=result["title"],
+                title=result.title,
                 breach_category=category.name,
                 severity=severity.name,
                 affected_count=affected_count,
-                source=result["source"],
-                url=result["url"],
-                summary=result["summary"],
-                full_text_of_article = result["full_text_of_article"],
-                number_of_records_breached = result["number_of_records_breached"],
-                names_of_threat_actors = result["names_of_threat_actors"],
-                publish_date= result['publish_date'],
+                source=result.source,
+                url=result.url,
+                summary=result.summary,
+                full_text_of_article = result.full_text_of_article,
+                number_of_records_breached = result.number_of_records_breached,
+                names_of_threat_actors = result.names_of_threat_actors,
+                publish_date= result.publish_date,
                 ai_reasoning = ''
             )
 
             processed_incidents.append(incident)
+
 
         # Let AI prioritize the incidents
         prioritized_incidents, prioritization_reasoning = self.ai_prioritize_incidents(processed_incidents)
@@ -1037,7 +1099,7 @@ class TrueAIBreachAgent:
 
         return {
             "summary_of_ai_decisions": ai_response_message,
-            "incidents_found": len(search_results),
+            "incidents_found": len(articles),
             "incidents_processed": prioritized_incidents,
             "email_html": email_html,
             "decision_log": self.decision_log,
@@ -1045,7 +1107,7 @@ class TrueAIBreachAgent:
             "total_ai_decisions": len(self.decision_log)
         }
 
-def startAI_Agent():
+def startAI_Agent(gather_articles_only=False):
     global total_cost
 
     # Initialize LLM client (replace with real API integration)
@@ -1054,11 +1116,18 @@ def startAI_Agent():
     # Initialize the TRUE AI agent
     ai_agent = TrueAIBreachAgent(llm_client, healthcare_focus=True)
 
-    print("🤖 Starting TRUE AI Cybersecurity Breach Agent...")
-    print("🧠 All decisions will be made by AI, not hardcoded rules")
-    print("=" * 70)
+    if gather_articles_only:
+        print("Gathering articles only. Final report will use all articles.")
+    else:
+        print("🤖 Starting AI Cybersecurity Breach Agent...")
+        print("🧠 All decisions will be made by AI, not hardcoded rules")
+        print("=" * 70)
 
-    results = ai_agent.run_ai_agent()
+    results = ai_agent.run_ai_agent(gather_articles_only)
+
+    if gather_articles_only:
+        print("News articles have been gathered and saved to DB")
+        return
 
     # Display results
     print(f"\n📊 AI AGENT RESULTS:")

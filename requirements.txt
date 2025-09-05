@@ -5,3 +5,7 @@ lxml_html_clean
 lxml
 google-genai
 google-api-python-client
+numpy
+scikit-learn
+openai
+pytz
