@@ -343,7 +343,7 @@ def recluster_all_articles(similarity_threshold: float = 0.8) -> dict:
     with transaction.atomic():
         # Reset cluster IDs
         # only articles with story_cluster_id == None will be reclustered
-        NewsArticle.objects.filter(
+        articles = NewsArticle.objects.filter(
             created_at__range=(START_DATE, END_DATE)
         ).update(story_cluster_id=None)
 

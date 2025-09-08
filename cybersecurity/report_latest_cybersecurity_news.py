@@ -41,7 +41,56 @@ class NewsItem:
     names_of_threat_actors: str
 from dateutil import parser
 
-def regularize_date_format(date_input):
+
+def regularize_date_format_for_use_in_database(date_input):
+    """
+    Convert various date formats to ISO-like format: YYYY-MM-DD HH:MM[:ss[.uuuuuu]][TZ]
+
+    Handles virtually any date format using dateutil parser.
+    Examples:
+    - "August 23, 2025 00:00 UTC" -> "2025-08-23 00:00:00+00:00"
+    - "2025-08-23" -> "2025-08-23 00:00:00"
+    - "2025-08-24T14:14:00Z" -> "2025-08-24 14:14:00+00:00"
+    - "Aug 24, 2025" -> "2025-08-24 00:00:00"
+    - "24/08/2025" -> "2025-08-24 00:00:00"
+    - And many more...
+    """
+
+    try:
+        # Check if the input is already a datetime object
+        if isinstance(date_input, datetime):
+            parsed_date = date_input
+        else:
+            # If it's a string, strip whitespace and parse it
+            date_string = date_input.strip()
+            parsed_date = parser.parse(date_string)
+
+        # Format the datetime object into the desired ISO-like format
+        # This handles timezone info if present
+        if parsed_date.tzinfo is not None:
+            # Has timezone info - include it
+            if parsed_date.microsecond > 0:
+                # Include microseconds if present
+                return parsed_date.strftime("%Y-%m-%d %H:%M:%S.%f%z")
+            else:
+                # No microseconds
+                return parsed_date.strftime("%Y-%m-%d %H:%M:%S%z")
+        else:
+            # No timezone info
+            if parsed_date.microsecond > 0:
+                # Include microseconds if present
+                return parsed_date.strftime("%Y-%m-%d %H:%M:%S.%f")
+            else:
+                # Standard format without microseconds
+                return parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+
+    except (ValueError, parser.ParserError, AttributeError):
+        # If parsing fails or the input is not a string or datetime object,
+        # return the original value.
+        return date_input
+
+
+def regularize_date_format_for_use_in_html(date_input):
     """
     Convert various date formats to 'Aug 23, 2025' format.
 
@@ -329,6 +378,7 @@ def extract_reasoning_and_json(text):
     Extracts content inside <think>...</think> to 'reasoning',
     and first JSON array inside triple backticks (``````) to 'response_object'.
     """
+    reasoning = ''
     response_object = None
 
     #find start of json
@@ -338,6 +388,13 @@ def extract_reasoning_and_json(text):
         reasoning = text[:position]
         json_object_as_string = text[position:]
 
+        # Regex pattern to find the incorrect closing double-quote
+        # It looks for a double-quote followed by a comma, which is followed by
+        # a newline and another double-quote (the start of the next key)
+        # or end of the json object.
+        # pattern = r'(?<!\\)"(?=\s*,(?:\s*"))'
+        # json_object_as_string = re.sub(pattern, '', json_object_as_string)
+
         #sometimes the LLM returns anomalies. check for known anomalies
         brackets = [(m.start(), m.group()) for m in re.finditer(r'[\[\]]', json_object_as_string)]
         print("Last few brackets:", brackets[-10:])
@@ -346,11 +403,7 @@ def extract_reasoning_and_json(text):
         try:
             # Parse incrementally to find where valid JSON ends
             decoder = json.JSONDecoder()
-            obj, idx = decoder.raw_decode(json_object_as_string)
-            print(f"Valid JSON ends at character {idx}")
-            print("Extra content:", repr(json_object_as_string[idx:idx+100]))
-            json_object_as_string = json_object_as_string[0:idx]
-            response_object = json.loads(json_object_as_string)
+            response_object, idx = decoder.raw_decode(json_object_as_string)
         except json.JSONDecodeError as e:
             print("Decoder error:", e, "probably no news yet today")
             breakpoint()
@@ -547,7 +600,7 @@ class TrueAIBreachAgent:
             reasoning, articles_object =  extract_reasoning_and_json(python_object.text)
             # google likes to provide vertexaisearch.cloud.google.com urls that redirect to the real url
             # let's get the real url
-            today_str = regularize_date_format(today_str)
+            today_str = regularize_date_format_for_use_in_html(today_str)
             if articles_object is None:
                 #no articles found
                 breakpoint()
@@ -557,7 +610,7 @@ class TrueAIBreachAgent:
                 okay_to_add_this_article = article_new is not None
                 if okay_to_add_this_article:
                     publish_date_of_this_article = article_new["publish_date"]
-                    publish_date_of_this_article = regularize_date_format(publish_date_of_this_article)
+                    publish_date_of_this_article = regularize_date_format_for_use_in_html(publish_date_of_this_article)
                     if publish_date_of_this_article != today_str:
                         okay_to_add_this_article = False
                 if okay_to_add_this_article:
@@ -826,7 +879,7 @@ class TrueAIBreachAgent:
                 "source": incident.source,
                 "severity": incident.severity,
                 "url": incident.url,
-                "publish_date": regularize_date_format(incident.publish_date),
+                "publish_date": regularize_date_format_for_use_in_html(incident.publish_date),
                 "names_of_potential_threat_actors": incident.names_of_threat_actors,
                 "number_of_records_breached": incident.number_of_records_breached
             })
@@ -903,28 +956,32 @@ class TrueAIBreachAgent:
         if gather_articles_only:
             search_results = self.get_news_from_llm()
             for result in search_results:
-                embedding_data = generate_article_embeddings(result)
+                try:
+                    embedding_data = generate_article_embeddings(result)
 
-                # Create article with embeddings
-                incident, created = NewsArticle.objects.get_or_create(
-                    url=result["url"],
-                    defaults={
-                        'title': result["title"],
-                        'source': result["source"],
-                        'summary': result["summary"],
-                        'full_text_of_article': result["full_text_of_article"],
-                        'number_of_records_breached': result["number_of_records_breached"],
-                        'names_of_threat_actors': result["names_of_threat_actors"],
-                        'publish_date': result['publish_date'],
-                        # Add embeddings
-                        **embedding_data
-                    }
-                )
+                    # Create article with embeddings
+                    incident, created = NewsArticle.objects.get_or_create(
+                        url=result["url"],
+                        defaults={
+                            'title': result["title"],
+                            'source': result["source"],
+                            'summary': result["summary"],
+                            'full_text_of_article': result["full_text_of_article"],
+                            'number_of_records_breached': result["number_of_records_breached"],
+                            'names_of_threat_actors': result["names_of_threat_actors"],
+                            'publish_date': regularize_date_format_for_use_in_database(result['publish_date']),
+                            # Add embeddings
+                            **embedding_data
+                        }
+                    )
 
-                if created:
-                    logger.info(f"Created new article with embeddings: {incident.title}")
-                else:
-                    logger.info(f"Article already exists: {incident.title}")
+                    if created:
+                        logger.info(f"Created new article with embeddings: {incident.title}")
+                    else:
+                        logger.info(f"Article already exists: {incident.title}")
+                except Exception as e:
+                    print('gather_articles_only: ', e)
+
 
             recluster_all_articles()
             return {
