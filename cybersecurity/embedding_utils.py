@@ -6,7 +6,7 @@ from django.conf import settings
 from django.db import transaction
 import os
 
-from .analysis_settings import START_DATE, END_DATE
+from .analysis_settings import START_DATE, END_DATE, SIMILARITY_THRESHOLD_FOR_FINDING_SIMILAR_ARTICLES
 from .models import NewsArticle
 import uuid
 
@@ -169,7 +169,7 @@ def generate_article_embeddings(article_data: dict) -> dict:
         'title_summary_embedding': embeddings[2]
     }
 
-def assign_story_cluster_id(article: NewsArticle, similarity_threshold: float = 0.8) -> str:
+def assign_story_cluster_id(article: NewsArticle, similarity_threshold: float = SIMILARITY_THRESHOLD_FOR_FINDING_SIMILAR_ARTICLES) -> str:
     """
     Assign a story_cluster_id to an article by finding similar existing articles
     or creating a new cluster if no similar articles are found.
@@ -326,7 +326,7 @@ def analyze_clusters() -> dict:
     return stats
 
 
-def recluster_all_articles(similarity_threshold: float = 0.8) -> dict:
+def recluster_all_articles(similarity_threshold: float = SIMILARITY_THRESHOLD_FOR_FINDING_SIMILAR_ARTICLES) -> dict:
     """
     Reset all cluster IDs and recluster everything from scratch.
     Use with caution - this will reassign all cluster IDs.

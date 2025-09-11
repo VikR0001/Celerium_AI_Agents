@@ -21,7 +21,7 @@ class Command(BaseCommand):
 
         try:
             # Report generation logic will go here
-            self.stdout.write(self.style.SUCCESS('Successfully generated cost analysis reports'))
+            self.stdout.write(self.style.SUCCESS('Successfully reports'))
         except Exception as e:
             self.stdout.write(
                 self.style.ERROR(f'Error generating reports: {str(e)}')

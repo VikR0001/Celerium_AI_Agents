@@ -283,11 +283,11 @@ def confirm_article_url(article, today_str):
     # let's try to look up the correct url
 
     prompt = f"""
-        Find the url from today, {today_str}, that talks about this:
+        Find a news story with the publish date in this range: ["{today_str} 00:00" to "{today_str} 23:59" UTC]. The story must talk about this:
         
         {article['summary']}
         
-        Return data about one single url. The published data for the url must be in this range: ["{today_str} 00:00" to "{today_str} 23:59" UTC].
+        Return data about one single url.
 
         Return the results as a JSON array. Include:
         
@@ -720,11 +720,15 @@ class TrueAIBreachAgent:
         If an article duplicates an article that has a higher priority, include this text in the reasoning: "DUPLICATE ARTICLE"
         """
 
-        ai_response_object = call_perplexity_api(severity_prompt, AI_MODEL_ALL)
-        ai_response_message = ai_response_object["choices"][0]["message"]["content"]
-        clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
-
-        parsed = self.llm.parse_structured_response(clean_string, ["Severity", "Affected Count", "Reasoning"])
+        try:
+            ai_response_object = call_perplexity_api(severity_prompt, AI_MODEL_ALL)
+            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+            clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
+            parsed = self.llm.parse_structured_response(clean_string, ["Severity", "Affected Count", "Reasoning"])
+        except Exception as e:
+            print('unexpected response from LLM for severity_prompt')
+            breakpoint()
+            exit(1)
 
         severity_str = parsed.get("severity", "MEDIUM").upper()
         affected_str = parsed.get("affected count", "0")
@@ -866,84 +870,154 @@ class TrueAIBreachAgent:
         return prioritized_incidents, reasoning
 
     def ai_generate_email_format(self, incidents: List[BreachIncident]) -> tuple[str, str]:
-        """
-        AI DECISION POINT 6: Let AI determine optimal presentation format
+        email_html = ""
+        BREACH_COLORS = {
+            'hospital': '#008000',
+            'medical': '#008080',
+            'business': '#3965bc'
+        }
+
+        SEVERITY_COLORS = {
+            'high': '#d32f2f',
+            'medium': '#fbc02d',
+            'low': '#388e3c',
+        }
+
+        email_html += f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="UTF-8">
+              <title>Cyber Breaches in the News Today</title>
+            </head>
+            <body style="margin:0;padding:0;background:#f7f7fa;font-family:Segoe UI, Arial, sans-serif;">
+              <!-- Header -->
+              <div style="background:#3965bc;padding:24px 0;text-align:center;">
+                <span style="color:#fff;font-size:28px;font-weight:600;letter-spacing:0.5px;line-height:1.2;">Cyber Breaches in the News Today</span>
+              </div>
+              <!-- Container -->
+              <div style="max-width:680px;margin:32px auto;padding:0 16px;">
+    
         """
         incident_data = []
         for incident in incidents:
-            incident_data.append({
-                "title": incident.title,
-                "breach_category": incident.breach_category,
-                "affected": incident.affected_count,
-                "summary": incident.summary,  # Limit for prompt size
-                "source": incident.source,
-                "severity": incident.severity,
-                "url": incident.url,
-                "publish_date": regularize_date_format_for_use_in_html(incident.publish_date),
-                "names_of_potential_threat_actors": incident.names_of_threat_actors,
-                "number_of_records_breached": incident.number_of_records_breached
-            })
+            color_for_breach_category = BREACH_COLORS[incident.breach_category.lower()]
+            color_for_severity = SEVERITY_COLORS[incident.severity.lower()]
+            email_html += f"""
+                <!-- Incident Card: {incident.title} -->
+                <div style="background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(57,101,188,0.07);margin-bottom:24px;padding:24px;">
+                  <a href="{incident.url}" style="font-size:20px;font-weight:600;color:#3965bc;text-decoration:none;line-height:1.4;display:block;">{incident.title}</a>
+                    
+                    <!-- Badges row (Outlook-safe) -->
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:12px 0 8px 0;">
+                      <tr>
+                        <td style="white-space:nowrap;">
+                          <span style="background:{color_for_breach_category};color:#ffffff;border-radius:18px;padding:4px 14px;font-size:13px;font-weight:500;display:inline-block;mso-line-height-rule:exactly;">{incident.breach_category}</span>
+                        </td>
+                        <td style="width:10px;font-size:0;line-height:0;">&nbsp;</td>
+                        <td style="white-space:nowrap;">
+                          <span style="background:{color_for_severity};color:#ffffff;border-radius:14px;padding:2px 10px;font-size:12px;font-weight:500;display:inline-block;mso-line-height-rule:exactly;">{incident.severity}</span>
+                        </td>
+                      </tr>
+                    </table>
+                    
+                  <div style="font-size:15px;color:#222;margin-bottom:14px;line-height:1.6;">
+                    {incident.summary}
+                  </div>
+                  <div style="font-size:13px;color:#555;line-height:1.7;">
+                    <strong>Publish Date:</strong> {incident.publish_date}<br>
+                    <strong>Number of Records Breached:</strong> {incident.number_of_records_breached}<br>
+                    <strong>Potential Threat Actors:</strong> {incident.names_of_threat_actors}<br>
+                    <strong>Source:</strong> {incident.source}<br>
+                  </div>
+                </div>
+            """
 
-        format_prompt = f"""
-        You are designing an email briefing format for healthcare cybersecurity professionals.
-        
-        Context: Daily threat intelligence briefing
-        Audience: Healthcare CISOs, security analysts, IT directors
-        Delivery: HTML email
-        
-        Here is the title shown in the email:
-        Cyber Breaches in the News Today
-        
-        Put that title in white text on a #3965bc background.
-        
-        Incident data to present:
-        {json.dumps(incident_data, indent=2)}
-        
-        Design decisions to make:
-        - How to make the email look professionally-designed?
-        - How should incidents be visually differentiated?
-        - What information should be most prominent?
-        - What visual hierarchy works best for busy executives?
-        - How to make sure the HTML will work in an email?
-        
-        Provide your formatting strategy and reasoning, then generate the HTML.
-        
-        Use this color scheme:
-        - Primary accent: #3965bc
-        
-        For breach_category, use these highlight colors:
-        - Hospital: white text on green rounded rect
-        - Medical:  white text on #008080 rounded rect
-        - Business: white text on #3965bc rounded rect
-        
-        Make sure to put breach_category on its own separate line
-    
-        For each article, MAKE SURE TO INCLUDE EACH OF THE FOLLOWING:
-        - Title
-        - Summary
-        - breach_category
-        - publish_date
-        - severity
-        - Clicking the article title should take us to the url of the source
-        - Number of records breached (if that is known)
-        - Names of the potential threat actors (if that is known)
-        - Source
-        
-        Respond in this format:
-        Format Strategy: [Your design reasoning and approach]
-        HTML: [Complete HTML email code]
+        email_html += f"""  </div>
+            </body>
+            </html>
         """
 
-        ai_response_object = call_perplexity_api(format_prompt, AI_MODEL_ALL)
-        ai_response_message = ai_response_object["choices"][0]["message"]["content"]
-        html_match = re.search(r'HTML:\s*```html\s*(.*?)\s*```', ai_response_message, re.DOTALL)
-        if html_match:
-            clean_string = html_match.group(1).strip()
-
-        strategy_reasoning = "AI determined optimal visual hierarchy with healthcare-specific iconography and severity color coding for rapid threat assessment by busy cybersecurity professionals."
-
-        self.log_ai_decision("Email Format Generation", "Generate Email Format", strategy_reasoning, f"Generated {len(clean_string)} character HTML")
-        return clean_string, strategy_reasoning
+        # IF YOU GIVE AI TOO MANY STORIES IT GETS CONFUSED AND ONLY GIVES YOU BACK 5-8 STORIES
+        # HERE'S THE CODE
+        """
+        # AI DECISION POINT 6: Let AI determine optimal presentation format
+ 
+        # incident_data = []
+        # for incident in incidents:
+        #     incident_data.append({
+        #         "title": incident.title,
+        #         "breach_category": incident.breach_category,
+        #         "affected": incident.affected_count,
+        #         "summary": incident.summary,  # Limit for prompt size
+        #         "source": incident.source,
+        #         "severity": incident.severity,
+        #         "url": incident.url,
+        #         "publish_date": regularize_date_format_for_use_in_html(incident.publish_date),
+        #         "names_of_potential_threat_actors": incident.names_of_threat_actors,
+        #         "number_of_records_breached": incident.number_of_records_breached
+        #     })
+        #
+        # format_prompt = f"""
+        # You are designing an email briefing format for healthcare cybersecurity professionals.
+        #
+        # Context: Daily threat intelligence briefing
+        # Audience: Healthcare CISOs, security analysts, IT directors
+        # Delivery: HTML email
+        #
+        # Here is the title shown in the email:
+        # Cyber Breaches in the News Today
+        #
+        # Put that title in white text on a #3965bc background.
+        #
+        # Incident data to present:
+        # {json.dumps(incident_data, indent=2)}
+        #
+        # Design decisions to make:
+        # - How to make the email look professionally-designed?
+        # - How should incidents be visually differentiated?
+        # - What information should be most prominent?
+        # - What visual hierarchy works best for busy executives?
+        # - How to make sure the HTML will work in an email?
+        #
+        # Provide your formatting strategy and reasoning, then generate the HTML.
+        #
+        # Use this color scheme:
+        # - Primary accent: #3965bc
+        #
+        # For breach_category, use these highlight colors:
+        # - Hospital: white text on green rounded rect
+        # - Medical:  white text on #008080 rounded rect
+        # - Business: white text on #3965bc rounded rect
+        #
+        # Make sure to put breach_category on its own separate line
+        #
+        # For each article, MAKE SURE TO INCLUDE EACH OF THE FOLLOWING:
+        # - Title
+        # - Summary
+        # - breach_category
+        # - publish_date
+        # - severity
+        # - Clicking the article title should take us to the url of the source
+        # - Number of records breached (if that is known)
+        # - Names of the potential threat actors (if that is known)
+        # - Source
+        #
+        # Respond in this format:
+        # Format Strategy: [Your design reasoning and approach]
+        # HTML: [Complete HTML email code]
+        # """
+        #
+        # ai_response_object = call_perplexity_api(format_prompt, AI_MODEL_ALL)
+        # ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        # html_match = re.search(r'HTML:\s*```html\s*(.*?)\s*```', ai_response_message, re.DOTALL)
+        # if html_match:
+        #     clean_string = html_match.group(1).strip()
+        #
+        # strategy_reasoning = "AI determined optimal visual hierarchy with healthcare-specific iconography and severity color coding for rapid threat assessment by busy cybersecurity professionals."
+        #
+        # self.log_ai_decision("Email Format Generation", "Generate Email Format", strategy_reasoning, f"Generated {len(clean_string)} character HTML")
+        return email_html, ""
 
     def run_ai_agent(self, gather_articles_only) -> Dict[str, Any]:
         """
@@ -997,13 +1071,18 @@ class TrueAIBreachAgent:
 
         processed_incidents = []
 
+        recluster_all_articles()
+
         articles = NewsArticle.objects.filter(
             created_at__range=(START_DATE, END_DATE)
         ).order_by('story_cluster_id', 'created_at')
 
+        print('total articles before de-duplication: ', articles.count())
         story_cluster_ids = []
+
         for result in articles:
             if result.story_cluster_id in story_cluster_ids:
+                print('Found duplicate story cluster id:', result.story_cluster_id)
                 continue
 
             story_cluster_ids.append(result.story_cluster_id)
@@ -1030,6 +1109,7 @@ class TrueAIBreachAgent:
 
             processed_incidents.append(incident)
 
+        print('total articles after de-duplication: ', len(processed_incidents))
 
         # Let AI prioritize the incidents
         prioritized_incidents, prioritization_reasoning = self.ai_prioritize_incidents(processed_incidents)
