@@ -9,3 +9,5 @@ numpy
 scikit-learn
 openai
 pytz
+anthropic
+json-repair

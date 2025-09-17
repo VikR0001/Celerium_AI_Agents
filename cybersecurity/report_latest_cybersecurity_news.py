@@ -3,6 +3,8 @@ Cybersecurity Breach News AI Agent
 This agent searches for cybersecurity breach news from today and sends email alerts.
 """
 import re
+
+import openai
 from google import genai
 from google.genai import types
 import os
@@ -19,15 +21,20 @@ from dataclasses import dataclass
 from enum import Enum
 from django.db.models import F, OuterRef, Subquery
 from newspaper import Article
+from json_repair import repair_json
 
-from cybersecurity.analysis_settings import START_DATE, END_DATE
+from cybersecurity.analysis_settings import START_DATE, END_DATE, LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS, CHAT_GPT_OPEN_AI, \
+    PERPLEXITY, CLAUDE_ANTHROPIC, GEMINI_GOOGLE
 from cybersecurity.embedding_utils import generate_article_embeddings, logger, recluster_all_articles
 from cybersecurity.models import NewsArticle
 
 total_cost = 0
 
-AI_MODEL_ALL = 'sonar-pro'
-AI_MODEL_GET_NEWS = 'sonar-reasoning-pro'
+OPENAI_API_KEY = os.getenv('CHAT_GPT_OPEN_AI_KEY')
+
+openAI_client = openai.OpenAI(
+    api_key=OPENAI_API_KEY
+)
 
 class NewsItem:
     """Data class to store news item information"""
@@ -121,10 +128,177 @@ def regularize_date_format_for_use_in_html(date_input):
         # return the original value.
         return date_input
 
-
-def call_gemini_api(prompt, model_specifier = ''):
+def call_claude_anthropic_api(prompt):
+    import anthropic
     global total_cost
+    GOOGLE_GEMINI_API_KEY = os.getenv('CLAUDE_ANTHROPIC_API_KEY')
 
+    def calculate_claude_cost(model, input_tokens, output_tokens, cache_write_tokens=0, cache_read_tokens=0, cache_type="5m"):
+        """
+        Calculate the cost of a Claude API call based on token usage.
+
+        Args:
+            model: Claude model name (e.g., "claude-sonnet-4", "claude-haiku-3.5")
+            input_tokens: Number of input tokens
+            output_tokens: Number of output tokens
+            cache_write_tokens: Number of cache write tokens (optional)
+            cache_read_tokens: Number of cache read tokens (optional)
+            cache_type: Cache type "5m" or "1h" for cache duration (optional)
+
+        Returns:
+            Total cost in USD
+        """
+
+        normalized = model.replace('_', '.').split('-')[:-1]  # Remove date part
+        model = '-'.join(normalized)
+
+        # Pricing per million tokens (MTok) from Claude docs
+        pricing = {
+            "claude-opus-4-1": {"input": 15, "output": 75, "cache_5m": 18.75, "cache_1h": 30, "cache_read": 1.50},
+            "claude-opus-4": {"input": 15, "output": 75, "cache_5m": 18.75, "cache_1h": 30, "cache_read": 1.50},
+            "claude-sonnet-4": {"input": 3, "output": 15, "cache_5m": 3.75, "cache_1h": 6, "cache_read": 0.30},
+            "claude-sonnet-3-7": {"input": 3, "output": 15, "cache_5m": 3.75, "cache_1h": 6, "cache_read": 0.30},
+            "claude-haiku-3-5": {"input": 0.80, "output": 4, "cache_5m": 1, "cache_1h": 1.6, "cache_read": 0.08},
+            "claude-haiku-3": {"input": 0.25, "output": 1.25, "cache_5m": 0.30, "cache_1h": 0.50, "cache_read": 0.03}
+        }
+
+        if model not in pricing:
+            raise ValueError(f"Model {model} not found in pricing table")
+
+        model_pricing = pricing[model]
+
+        # Calculate costs (convert tokens to millions)
+        input_cost = (input_tokens / 1_000_000) * model_pricing["input"]
+        output_cost = (output_tokens / 1_000_000) * model_pricing["output"]
+
+        cache_write_cost = 0
+        if cache_write_tokens > 0:
+            cache_key = f"cache_{cache_type}"
+            if cache_key in model_pricing:
+                cache_write_cost = (cache_write_tokens / 1_000_000) * model_pricing[cache_key]
+
+        cache_read_cost = 0
+        if cache_read_tokens > 0:
+            cache_read_cost = (cache_read_tokens / 1_000_000) * model_pricing["cache_read"]
+
+        total_cost = input_cost + output_cost + cache_write_cost + cache_read_cost
+        return total_cost
+
+    model = 'claude-opus-4-1-20250805'
+
+    client = anthropic.Anthropic(  # defaults to os.environ.get("ANTHROPIC_API_KEY")
+        api_key=GOOGLE_GEMINI_API_KEY,
+    )
+    response = client.messages.create(
+        model= model,
+        max_tokens=2000,
+        temperature=0,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+    )
+
+    input_tokens = response.usage.input_tokens
+    output_tokens = response.usage.output_tokens
+    model_name = response.model
+
+    # Calculate the cost
+    cost = calculate_claude_cost(
+        model=model_name,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens
+    )
+
+    total_cost += cost
+    print('Total cost so far:', total_cost)
+
+    return response
+
+def call_google_gemini_api(prompt):
+    global total_cost
+    model = 'gemini-2.5-flash'
+
+    # Note: Pricing tiers are based on the length of the prompt (in tokens).
+    MODEL_PRICES = {
+        "gemini-2.5-pro": {
+            "short_prompt": {
+                "input": 1.25,  # $1.25 per million tokens for prompts <= 200k tokens
+                "output": 10.0, # $10.00 per million tokens
+            },
+            "long_prompt": {
+                "input": 2.50,  # $2.50 per million tokens for prompts > 200k tokens
+                "output": 15.0, # $15.00 per million tokens
+            },
+        },
+        "gemini-2.5-flash": {
+            "input": 0.30,  # $0.30 per million input tokens
+            "output": 2.50, # $2.50 per million output tokens
+        },
+        "gemini-2.5-flash-lite": {
+            "input": 0.10,  # $0.10 per million input tokens
+            "output": 0.40, # $0.40 per million output tokens
+        },
+    }
+
+    #https://share.google/aimode/R6xP4VaGOoDciawap
+    def estimate_google_gemini_cost(response, model: str) -> float:
+        """
+        Estimate the dollar cost of a Google Gemini API response.
+
+        Args:
+            response: API response object from a Gemini client call.
+            model: string, the model name (e.g., "gemini-2.5-pro", "gemini-2.5-flash").
+
+        Returns:
+            float: estimated cost in USD
+        """
+
+        #google gemini said the tokens would be in response.usage, but
+        #I'm seeing them in usage_metadata
+        got_token_counts = False
+        try:
+            usage = response.usage
+            input_tokens = usage.prompt_tokens
+            output_tokens = usage.completion_tokens
+            got_token_counts = True
+        except Exception as e:
+            try:
+                #response.usage not found
+                #try response usage_metadata
+                usage = response.usage_metadata
+                input_tokens = usage.prompt_token_count
+                output_tokens = usage.usage_metadata.candidates_token_count + usage.usage_metadata.thoughts_token_count
+                got_token_counts = True
+            except Exception as e:
+                print('in estimate_google_gemini_cost for google gemini: ', e)
+                return 0
+
+        if model not in MODEL_PRICES:
+            print(f"Pricing not defined for model: {model}")
+            breakpoint()
+            return 0
+
+        # Handle tiered pricing for Gemini 2.5 Pro
+        if model == "gemini-2.5-pro":
+            if input_tokens > 200_000:
+                prices = MODEL_PRICES[model]["long_prompt"]
+            else:
+                prices = MODEL_PRICES[model]["short_prompt"]
+        else:
+            prices = MODEL_PRICES[model]
+
+        # Calculate cost per million tokens
+        input_cost = (input_tokens / 1_000_000) * prices["input"]
+        output_cost = (output_tokens / 1_000_000) * prices["output"]
+
+        return input_cost + output_cost
+
+
+    # model = 'gemini-2.5-pro'
+    model = 'gemini-2.5-flash'
     GOOGLE_GEMINI_API_KEY = os.getenv('GOOGLE_GEMINI_API_KEY')
     client = genai.Client(api_key=GOOGLE_GEMINI_API_KEY)
 
@@ -139,56 +313,78 @@ def call_gemini_api(prompt, model_specifier = ''):
     )
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model=model,
         contents= prompt,
         config=config,
     )
 
-    try:
-        # Costs per 1 million tokens for gemini-2.5-flash
-        INPUT_COST_PER_M_TOKENS = 0.30  # USD [1]
-        OUTPUT_COST_PER_M_TOKENS = 2.50  # USD [1]
+    cost = 0
+    # cost = estimate_google_gemini_cost(response, model)
 
-        # Cost per 1000 requests for Grounding with Google Search
-        GROUNDING_COST_PER_K_REQUESTS = 35.00  # USD [1]
-
-        # free for up to 1500 requests per day, so it's free to us
-        GROUNDING_COST_PER_K_REQUESTS = 0
-
-        input_tokens = response.usage_metadata.prompt_token_count
-        output_tokens = response.usage_metadata.candidates_token_count
-
-        # Check if grounding was used by looking for the `grounding_metadata` field.
-        # The `web_search_queries` array lists the searches performed by the model.[3]
-        if hasattr(response.candidates, 'grounding_metadata'):
-            search_queries_count = len(response.candidates.grounding_metadata.web_search_queries)
-        else:
-            search_queries_count = 0
-
-        # --- Step 4: Calculate the total cost ---
-
-        # Calculate token costs
-        input_cost = (input_tokens / 1_000_000) * INPUT_COST_PER_M_TOKENS
-        output_cost = (output_tokens / 1_000_000) * OUTPUT_COST_PER_M_TOKENS
-
-        # Calculate grounding cost (this is only billed after the free tier)
-        grounding_cost = (search_queries_count / 1_000) * GROUNDING_COST_PER_K_REQUESTS
-
-        cost = input_cost + output_cost + grounding_cost
-
-        total_cost += cost
-        print('Total cost so far:', total_cost)
-    except Exception as e:
-        print("Couldn't get gemini cost: ", e)
+    total_cost += cost
+    print('Total cost so far:', total_cost)
 
     return response
 
-def call_perplexity_api(prompt: str, model: str):
+def call_chatGPT_api(prompt, model_specifier = ''):
+
+    MODEL_PRICES = {
+        "gpt-4o": {"input": 5.0, "output": 15.0},   # $5 / $15
+        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "gpt-5": {"input": 10.0, "output": 30.0},   # Example placeholder
+    }
+
+    def estimate_ChatGPT_cost(response, model: str) -> float:
+        """
+        Estimate the dollar cost of an OpenAI API response.
+
+        Args:
+            response: API response object from client.chat.completions.create()
+            model: string, the model name (e.g., "gpt-4o", "gpt-5")
+
+        Returns:
+            float: estimated cost in USD
+        """
+        usage = response.usage
+        input_tokens = usage.prompt_tokens
+        output_tokens = usage.completion_tokens
+
+        if model not in MODEL_PRICES:
+            raise ValueError(f"Pricing not defined for model: {model}")
+
+        prices = MODEL_PRICES[model]
+        input_cost = (input_tokens / 1_000_000) * prices["input"]
+        output_cost = (output_tokens / 1_000_000) * prices["output"]
+
+        return input_cost + output_cost
+
+
+
+    global total_cost
+
+    MODEL = "gpt-5"
+
+    response = openAI_client.chat.completions.create(
+        model=MODEL,  # you can also use "gpt-4o-mini", "gpt-4o", etc.
+        messages=[
+            {"role": "system", "content": "You are an expert in cyber security breaches."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    cost = estimate_ChatGPT_cost(response, MODEL)
+    total_cost += cost
+    print('Total cost so far:', total_cost)
+
+    return response
+
+def call_perplexity_api(prompt: str):
     global total_cost
 
     """Call Perplexity API"""
     API_URL = "https://api.perplexity.ai/chat/completions"
     PERPLEXITY_API_KEY = os.getenv('PERPLEXITY_API_KEY')
+    model = 'sonar-pro'
 
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -264,6 +460,7 @@ def link_returns_status_200(url):
 
 
 def confirm_article_url(article, today_str):
+    LLM_TO_USE = GEMINI_GOOGLE
 
     # some of these vertex article_urls resolve to the real article
     if 'vertex' in article['url']:
@@ -283,14 +480,14 @@ def confirm_article_url(article, today_str):
     # let's try to look up the correct url
 
     prompt = f"""
-        Find a news story with the publish date in this range: ["{today_str} 00:00" to "{today_str} 23:59" UTC]. The story must talk about this:
+        Find news articles that feature the same or a similar breach at the same target organization:
         
-        {article['summary']}
+        {article['title']}
         
-        Return data about one single url.
+        They MUST have a publish date in this range: ["{today_str} 00:00" to "{today_str} 23:59" UTC]. This is VERY IMPORTANT! 
+        
+        Return a JSON array. For each matching article, return a JSON object in the array, with the following info:
 
-        Return the results as a JSON array. Include:
-        
         - title
         - url
         - source
@@ -299,33 +496,58 @@ def confirm_article_url(article, today_str):
         - full_text_of_article
         - number_of_records_breached (if unknown, put "unknown")
         - names_of_threat_actors (if unknown, put "unknown")
+        
+        If no such articles can be found, return a single json object with a field named "Result" that has the contents, "No matching articles found".
     """
 
     retry_count = 0
     MAX_RETRY_ATTEMPTS = 3
     got_our_data = False
-    python_object = call_perplexity_api(prompt, AI_MODEL_ALL)
-    if python_object is not None:
-        try:
-            urls_provided = python_object['citations']
+    article_new = None
+    urls_provided = []
 
-            article_string = python_object["choices"][0]["message"]["content"]
-            reasoning, article_new = extract_reasoning_and_json(article_string)
+    if LLM_TO_USE == PERPLEXITY:
+        python_object = call_perplexity_api(prompt)
+        python_object = call_perplexity_api(prompt)
+        if python_object is not None:
+            try:
+                urls_provided = python_object['citations']
 
-            if article_new is not None:
-                article_new = article_new[0]
-                url = article_new['url']
-                if link_returns_status_200(url):
-                    return article_new
+                article_string = python_object["choices"][0]["message"]["content"]
+                reasoning, article_new = extract_reasoning_and_json(article_string)
 
-            for url in urls_provided:
-                #confirm url is not a 404
-                if link_returns_status_200(url):
-                    got_our_data = True
-                    article_new['url'] = url
-                    break
-        except Exception as e:
-            print('confirm_article_url: ', e)
+                if article_new is not None:
+                    article_new = article_new[0]
+                    url = article_new['url']
+                    if link_returns_status_200(url):
+                        return article_new
+
+                for url in urls_provided:
+                    #confirm url is not a 404
+                    if link_returns_status_200(url):
+                        got_our_data = True
+                        article_new['url'] = url
+                        break
+            except Exception as e:
+                print('confirm_article_url: ', e)
+    elif LLM_TO_USE == GEMINI_GOOGLE:
+        python_object = call_google_gemini_api(prompt)
+        if python_object is not None:
+            try:
+                article_string = python_object.text;
+                reasoning, candidates = extract_reasoning_and_json(article_string)
+
+                okay_to_continue = candidates is not None
+                okay_to_continue = okay_to_continue and not('No articles found' in article_string)
+                if okay_to_continue:
+                    for index, candidate in enumerate(candidates):
+                        #confirm url is not a 404
+                        if link_returns_status_200(candidate['url']):
+                            got_our_data = True
+                            article_new = candidate
+                            break
+            except Exception as e:
+                print('confirm_article_url: ', e)
 
         return article_new
 
@@ -383,7 +605,12 @@ def extract_reasoning_and_json(text):
 
     #find start of json
     search_string = '[\n  {\n    "'
-    position = text.find(search_string)
+    try:
+        position = text.find(search_string)
+    except Exception as e:
+        print('extract_reasoning_and_json: ', e)
+
+
     if position != -1:
         reasoning = text[:position]
         json_object_as_string = text[position:]
@@ -403,12 +630,13 @@ def extract_reasoning_and_json(text):
         try:
             # Parse incrementally to find where valid JSON ends
             decoder = json.JSONDecoder()
+            json_object_as_string = repair_json(json_object_as_string) #a lot of times LLMs return invalid json
             response_object, idx = decoder.raw_decode(json_object_as_string)
         except json.JSONDecodeError as e:
-            print("Decoder error:", e, "probably no news yet today")
+            print("Decoder error:", e, "probably the LLM returned invalid json")
             breakpoint()
     else:
-        print("Search string not found - probably exceeded Maximum output token limit: 65,536 as of 9-2025")
+        print("Search string not found - article not found")
 
     return reasoning, response_object
 
@@ -533,9 +761,9 @@ class TrueAIBreachAgent:
         """Retrieve today's cybersecurity breach news using Gemini or Perplexity responses."""
         today_str = datetime.now().strftime("%B %d, %Y")
 
-        prompt = f"""I'm using the Google Gemini api to retrieve unique news stories.
-            You are a specialized AI assistant for news retrieval with a single purpose: to find and report on cybersecurity breaches that were published today.
-            
+        prompt = f"""You are a specialized AI assistant for news retrieval with a single purpose: to find articles aboutcybersecurity breaches.
+            The articles you find MUST have a publish date in this range: ["{today_str} 00:00" to "{today_str} 23:59" UTC]. This is VERY IMPORTANT! 
+
             **Your process must be as follows:**
             
             1.  **Initial Search (Hospitals & Medical Companies):**
@@ -580,7 +808,7 @@ class TrueAIBreachAgent:
             * Ensure all relevant stories are included and none are omitted due to incorrect deduplication.
         """
 
-        python_object = call_gemini_api(prompt, AI_MODEL_ALL)
+        python_object = call_google_gemini_api(prompt)
         if python_object is None:
             print('get_news_from_llm - No news stories found')
             breakpoint()
@@ -660,8 +888,16 @@ class TrueAIBreachAgent:
             Reasoning: [Your detailed analysis of why this categorization is appropriate]
             """
 
-        ai_response_object = call_perplexity_api(categorization_prompt, AI_MODEL_ALL)
-        ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        if LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CHAT_GPT_OPEN_AI:
+            ai_response_object = call_chatGPT_api(categorization_prompt)
+            ai_response_message = ai_response_object.choices[0].message.content
+        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == PERPLEXITY:
+            ai_response_object = call_perplexity_api(categorization_prompt)
+            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CLAUDE_ANTHROPIC:
+            ai_response_object = call_claude_anthropic_api(categorization_prompt)
+            ai_response_message = ai_response_object.content[0].text
+
         clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
 
         parsed = self.llm.parse_structured_response(clean_string, ["Category", "Reasoning"])
@@ -721,8 +957,16 @@ class TrueAIBreachAgent:
         """
 
         try:
-            ai_response_object = call_perplexity_api(severity_prompt, AI_MODEL_ALL)
-            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+            if LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CHAT_GPT_OPEN_AI:
+                ai_response_object = call_chatGPT_api(severity_prompt)
+                ai_response_message = ai_response_object.choices[0].message.content
+            elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == PERPLEXITY:
+                ai_response_object = call_perplexity_api(severity_prompt)
+                ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+            elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CLAUDE_ANTHROPIC:
+                ai_response_object = call_claude_anthropic_api(severity_prompt)
+                ai_response_message = ai_response_object.content[0].text
+
             clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
             parsed = self.llm.parse_structured_response(clean_string, ["Severity", "Affected Count", "Reasoning"])
         except Exception as e:
@@ -737,7 +981,7 @@ class TrueAIBreachAgent:
         try:
             severity = SeverityLevel(severity_str.replace('*', '').lower())
         except ValueError:
-            severity = SeverityLevel.MEDIUM
+            breakpoint()
             reasoning += f" (Note: AI returned '{severity_str}', defaulted to MEDIUM)"
 
         # Extract affected count
@@ -842,8 +1086,16 @@ class TrueAIBreachAgent:
         Reasoning: [Your detailed prioritization logic]
         """
 
-        ai_response_object = call_perplexity_api(prioritization_prompt, AI_MODEL_ALL)
-        ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        if LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CHAT_GPT_OPEN_AI:
+            ai_response_object = call_chatGPT_api(prioritization_prompt)
+            ai_response_message = ai_response_object.choices[0].message.content
+        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == PERPLEXITY:
+            ai_response_object = call_perplexity_api(prioritization_prompt)
+            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CLAUDE_ANTHROPIC:
+            ai_response_object = call_claude_anthropic_api(prioritization_prompt)
+            ai_response_message = ai_response_object.content[0].text
+
         clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
         parsed = self.llm.parse_structured_response(clean_string, ["Priority Order", "Reasoning"])
 
@@ -1008,7 +1260,7 @@ class TrueAIBreachAgent:
         # HTML: [Complete HTML email code]
         # """
         #
-        # ai_response_object = call_perplexity_api(format_prompt, AI_MODEL_ALL)
+        # ai_response_object = call_perplexity_api(format_prompt)
         # ai_response_message = ai_response_object["choices"][0]["message"]["content"]
         # html_match = re.search(r'HTML:\s*```html\s*(.*?)\s*```', ai_response_message, re.DOTALL)
         # if html_match:
@@ -1070,8 +1322,6 @@ class TrueAIBreachAgent:
 
 
         processed_incidents = []
-
-        recluster_all_articles()
 
         articles = NewsArticle.objects.filter(
             created_at__range=(START_DATE, END_DATE)
@@ -1229,8 +1479,16 @@ class TrueAIBreachAgent:
         Provide the results in html format. Return only the html.
         """
 
-        ai_response_object = call_perplexity_api(summary_prompt, AI_MODEL_ALL)
-        ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        if LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CHAT_GPT_OPEN_AI:
+            ai_response_object = call_chatGPT_api(summary_prompt)
+            ai_response_message = ai_response_object.choices[0].message.content
+        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == PERPLEXITY:
+            ai_response_object = call_perplexity_api(summary_prompt)
+            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
+        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CLAUDE_ANTHROPIC:
+            ai_response_object = call_claude_anthropic_api(summary_prompt)
+            ai_response_message = ai_response_object.content[0].text
+
         ai_response_message.replace("```html", "").replace("```", "")
         self.log_ai_decision("Final AI Summary", 'Wrap-Up', ai_response_message, "COMPLETED")
 

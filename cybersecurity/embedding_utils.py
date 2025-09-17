@@ -93,7 +93,7 @@ def generate_embeddings_batch(texts: List[str], model: str = "text-embedding-3-s
         List[Optional[List[float]]]: List of embedding vectors, None for failed generations
     """
 
-    OPENAI_API_KEY = os.getenv('OPEN_AI_API_KEY')
+    OPENAI_API_KEY = os.getenv('CHAT_GPT_OPEN_AI_KEY')
 
     if not texts:
         return []
