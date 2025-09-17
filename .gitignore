@@ -9,3 +9,5 @@ env_aws_15_accts.xlsx
 __pycache__/
 *.pyc
 *.pyo
+output/
+db.sqlite3
