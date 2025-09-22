@@ -202,18 +202,24 @@ def assign_story_cluster_id(article: NewsArticle, similarity_threshold: float = 
             exclude_id=article.id
         )
 
+        found_a_story_cluster_id = False
         if similar_stories:
-            # Use the cluster ID from the most similar story
-            most_similar_article = similar_stories[0][0]  # (article, similarity_score)
-            similarity_score = similar_stories[0][1]
+            for similar_story in similar_stories:
+                # Use the cluster ID from the most similar story
+                most_similar_article = similar_story[0]  # (article, similarity_score)
+                similarity_score = similar_story[1]
 
-            if most_similar_article.story_cluster_id:
-                article.story_cluster_id = most_similar_article.story_cluster_id
-                article.save()
+                if (not most_similar_article.story_cluster_id):
+                    continue
 
-                logger.info(f"Assigned existing cluster {article.story_cluster_id} to article {article.id} "
-                            f"(similarity: {similarity_score:.3f} using {field})")
-                return article.story_cluster_id
+                if most_similar_article.story_cluster_id:
+                    article.story_cluster_id = most_similar_article.story_cluster_id
+                    article.save()
+                    found_a_story_cluster_id = True
+
+                    logger.info(f"Assigned existing cluster {article.story_cluster_id} to article {article.id} "
+                                f"(similarity: {similarity_score:.3f} using {field})")
+                    return article.story_cluster_id
 
     # No similar stories found, create new cluster
     new_cluster_id = str(uuid.uuid4())
@@ -224,7 +230,7 @@ def assign_story_cluster_id(article: NewsArticle, similarity_threshold: float = 
     return new_cluster_id
 
 
-def batch_assign_clusters(similarity_threshold: float = 0.8) -> dict:
+def batch_assign_clusters(similarity_threshold: float = SIMILARITY_THRESHOLD_FOR_FINDING_SIMILAR_ARTICLES) -> dict:
     """
     Assign cluster IDs to all articles that don't have one yet.
     Processes articles in chronological order (oldest first).
@@ -343,9 +349,10 @@ def recluster_all_articles(similarity_threshold: float = SIMILARITY_THRESHOLD_FO
     with transaction.atomic():
         # Reset cluster IDs
         # only articles with story_cluster_id == None will be reclustered
-        articles = NewsArticle.objects.filter(
+        articles_updated = NewsArticle.objects.filter(
             created_at__range=(START_DATE, END_DATE)
         ).update(story_cluster_id=None)
+        print(f"articles_updated: {articles_updated}")
 
         # Run batch assignment
         stats = batch_assign_clusters(similarity_threshold)

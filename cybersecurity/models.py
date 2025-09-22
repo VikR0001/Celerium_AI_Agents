@@ -1,6 +1,8 @@
 from django.db import models
 from django.utils import timezone
 
+from cybersecurity.analysis_settings import SIMILARITY_THRESHOLD_FOR_FINDING_SIMILAR_ARTICLES
+
 
 class NewsArticle(models.Model):
     """
@@ -133,7 +135,7 @@ class NewsArticle(models.Model):
         return cosine_similarity(vec1, vec2)[0][0]
 
     @classmethod
-    def find_similar_stories(cls, embedding_vector, field='summary_embedding', threshold=0.8, exclude_id=None):
+    def find_similar_stories(cls, embedding_vector, field='summary_embedding', threshold=SIMILARITY_THRESHOLD_FOR_FINDING_SIMILAR_ARTICLES, exclude_id=None):
         """
         Find stories with similar embeddings above the threshold
         """
@@ -142,7 +144,8 @@ class NewsArticle(models.Model):
 
         # Get all records with embeddings for the specified field
         queryset = cls.objects.exclude(id=exclude_id) if exclude_id else cls.objects.all()
-        records_with_embeddings = queryset.filter(**{f"{field}__isnull": False})
+        # records_with_embeddings = queryset.filter(**{f"{field}__isnull": False})
+        records_with_embeddings = queryset.filter(**{f"{field}__isnull": False}).order_by('created_at')
 
         similar_stories = []
         target_vec = np.array(embedding_vector).reshape(1, -1)

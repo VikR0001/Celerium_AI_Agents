@@ -128,6 +128,18 @@ def regularize_date_format_for_use_in_html(date_input):
         # return the original value.
         return date_input
 
+def get_text_message_from_llm_response(LLM_used, LLM_response):
+    if LLM_used == CHAT_GPT_OPEN_AI:
+        ai_response_message = LLM_response.choices[0].message.content
+    elif LLM_used == PERPLEXITY:
+        ai_response_message = LLM_response["choices"][0]["message"]["content"]
+    elif LLM_used == CLAUDE_ANTHROPIC:
+        ai_response_message = LLM_response.content[0].text
+    elif LLM_used == GEMINI_GOOGLE:
+        ai_response_message = LLM_response.text;
+
+    return ai_response_message
+
 def call_claude_anthropic_api(prompt):
     import anthropic
     global total_cost
@@ -268,9 +280,9 @@ def call_google_gemini_api(prompt):
             try:
                 #response.usage not found
                 #try response usage_metadata
-                usage = response.usage_metadata
-                input_tokens = usage.prompt_token_count
-                output_tokens = usage.usage_metadata.candidates_token_count + usage.usage_metadata.thoughts_token_count
+                usage_metadata = response.usage_metadata
+                input_tokens = usage_metadata.prompt_token_count
+                output_tokens = usage_metadata.candidates_token_count + usage_metadata.thoughts_token_count
                 got_token_counts = True
             except Exception as e:
                 print('in estimate_google_gemini_cost for google gemini: ', e)
@@ -319,14 +331,14 @@ def call_google_gemini_api(prompt):
     )
 
     cost = 0
-    # cost = estimate_google_gemini_cost(response, model)
+    cost = estimate_google_gemini_cost(response, model)
 
     total_cost += cost
     print('Total cost so far:', total_cost)
 
     return response
 
-def call_chatGPT_api(prompt, model_specifier = ''):
+def call_chatGPT_api(prompt, model_specifier = 'gpt-5'):
 
     MODEL_PRICES = {
         "gpt-4o": {"input": 5.0, "output": 15.0},   # $5 / $15
@@ -362,7 +374,7 @@ def call_chatGPT_api(prompt, model_specifier = ''):
 
     global total_cost
 
-    MODEL = "gpt-5"
+    MODEL = model_specifier
 
     response = openAI_client.chat.completions.create(
         model=MODEL,  # you can also use "gpt-4o-mini", "gpt-4o", etc.
@@ -431,8 +443,10 @@ def remove_duplicate_titles(articles):
     return [article for article in articles
             if article['title'] not in seen and not seen.add(article['title'])]
 
-def link_returns_status_200(url):
+def link_returns_status_200(url, title):
     result = False
+    final_resolved_url = url
+
     try:
         # via gemini:
         # Q: I've got a url that when I put it in the browser, it loads just fine. But when I test it like this, I get a 403 response. How can that be?
@@ -453,14 +467,46 @@ def link_returns_status_200(url):
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             result = True
+            final_resolved_url = response.url
     except Exception as e:
-        pass;
+        pass
 
-    return result
+    if result:
+        html_content = response.text
+        result = False
+
+        prompt = f"""
+                I have this content from a web page: 
+                {html_content}
+                
+                Does that content discuss the subject described in this text:?
+                {title}
+                
+                Please respond with a JSON object containing these fields:
+                
+                "Match" - contains the text "true" if there is a match, or the text "false" if there is not a match, or the text "not sure" if it is not possible to tell.
+                "Reasoning" - your reasoning 
+            """
+
+        # Google has the best access to breaking news stories
+        try:
+            ai_response_object = call_google_gemini_api(prompt)
+            ai_response_message = get_text_message_from_llm_response(GEMINI_GOOGLE, ai_response_object)
+            ai_response_message = repair_json(ai_response_message)
+            ai_response_json = json.loads(ai_response_message)
+            result = "false" not in ai_response_json['Match'].lower()
+        except Exception as e:
+            result = True
+
+    return result, final_resolved_url
 
 
-def confirm_article_url(article, today_str):
-    LLM_TO_USE = GEMINI_GOOGLE
+def confirm_article_url(article):
+    today_str = datetime.now().strftime("%B %d, %Y")
+    title = article['title']
+    title = title.lower()
+    # if 'eskom' in title or 'lotte' in title or 'community' in title:
+    #     breakpoint()
 
     # some of these vertex article_urls resolve to the real article
     if 'vertex' in article['url']:
@@ -472,9 +518,8 @@ def confirm_article_url(article, today_str):
             pass #sometimes requests throws a max retries error, meaning it couldn't resolve the url
 
     final_url = article['url']
-    if link_returns_status_200(final_url):
-        article['url'] = final_url
-        return article
+    link_returns_200, final_resolved_url = link_returns_status_200(final_url, article['title'])
+    article['url'] = final_resolved_url
 
     # and, some only resolve to a 404
     # let's try to look up the correct url
@@ -500,54 +545,25 @@ def confirm_article_url(article, today_str):
         If no such articles can be found, return a single json object with a field named "Result" that has the contents, "No matching articles found".
     """
 
-    retry_count = 0
-    MAX_RETRY_ATTEMPTS = 3
-    got_our_data = False
     article_new = None
-    urls_provided = []
+    python_object = call_google_gemini_api(prompt)
+    if python_object is not None:
+        try:
+            article_string = python_object.text;
+            reasoning, candidates = extract_reasoning_and_json(article_string)
 
-    if LLM_TO_USE == PERPLEXITY:
-        python_object = call_perplexity_api(prompt)
-        python_object = call_perplexity_api(prompt)
-        if python_object is not None:
-            try:
-                urls_provided = python_object['citations']
-
-                article_string = python_object["choices"][0]["message"]["content"]
-                reasoning, article_new = extract_reasoning_and_json(article_string)
-
-                if article_new is not None:
-                    article_new = article_new[0]
-                    url = article_new['url']
-                    if link_returns_status_200(url):
-                        return article_new
-
-                for url in urls_provided:
+            okay_to_continue = candidates is not None
+            okay_to_continue = okay_to_continue and not('No articles found' in article_string)
+            if okay_to_continue:
+                for index, candidate in enumerate(candidates):
                     #confirm url is not a 404
-                    if link_returns_status_200(url):
-                        got_our_data = True
-                        article_new['url'] = url
+                    link_returns_200, final_resolved_url = link_returns_status_200(candidate['url'], candidate['title'])
+                    if link_returns_200:
+                        candidate['url'] = final_resolved_url
+                        article_new = candidate
                         break
-            except Exception as e:
-                print('confirm_article_url: ', e)
-    elif LLM_TO_USE == GEMINI_GOOGLE:
-        python_object = call_google_gemini_api(prompt)
-        if python_object is not None:
-            try:
-                article_string = python_object.text;
-                reasoning, candidates = extract_reasoning_and_json(article_string)
-
-                okay_to_continue = candidates is not None
-                okay_to_continue = okay_to_continue and not('No articles found' in article_string)
-                if okay_to_continue:
-                    for index, candidate in enumerate(candidates):
-                        #confirm url is not a 404
-                        if link_returns_status_200(candidate['url']):
-                            got_our_data = True
-                            article_new = candidate
-                            break
-            except Exception as e:
-                print('confirm_article_url: ', e)
+        except Exception as e:
+            print('confirm_article_url: ', e)
 
         return article_new
 
@@ -681,37 +697,37 @@ class LLMClient:
         # In real implementation, initialize your LLM client here
         # self.client = openai.OpenAI(api_key=api_key)
 
-    def generate(self, prompt: str, max_tokens: int = 500) -> str:
-        """
-        Make LLM API call - replace with actual API integration
-        """
-        # MOCK RESPONSE - Replace with real LLM API call
-        # Example: response = self.client.chat.completions.create(...)
-
-        # For demo purposes, returning realistic mock responses
-        if "categorize this cybersecurity incident" in prompt.lower():
-            return """
-            Category: HOSPITAL
-            Reasoning: This incident involves a healthcare system with patient data (PHI) and medical records, which directly affects hospital operations and patient privacy. The mention of "Healthcare System" and "2.3M Patients" clearly indicates this is a hospital-level incident requiring immediate attention from healthcare cybersecurity professionals.
-            """
-        elif "assess the severity" in prompt.lower():
-            return """
-            Severity: HIGH
-            Affected Count: 2300000
-            Reasoning: This is a high-severity incident due to the massive scale (2.3M affected individuals), the sensitive nature of healthcare data (PHI, medical records), and the operational impact on patient care. Healthcare data breaches carry additional regulatory and safety implications beyond typical business breaches.
-            """
-        elif "extract technical details" in prompt.lower():
-            return """
-            Technical Details:
-            - Attack vector: Ransomware deployment via compromised third-party vendor credentials
-            - Threat actor: RansomHub ransomware group (preliminary attribution based on TTPs)
-            - Data types compromised: PHI, SSNs, medical records, billing information
-            - Systems affected: Primary EHR platform and patient portal
-            - Impact duration: Systems offline for 72+ hours affecting patient care operations
-            - Recovery status: Partial systems restoration in progress
-            """
-        else:
-            return "Mock LLM response - replace with actual API integration"
+    # def generate(self, prompt: str, max_tokens: int = 500) -> str:
+    #     """
+    #     Make LLM API call - replace with actual API integration
+    #     """
+    #     # MOCK RESPONSE - Replace with real LLM API call
+    #     # Example: response = self.client.chat.completions.create(...)
+    #
+    #     # For demo purposes, returning realistic mock responses
+    #     if "categorize this cybersecurity incident" in prompt.lower():
+    #         return """
+    #         Category: HOSPITAL
+    #         Reasoning: This incident involves a healthcare system with patient data (PHI) and medical records, which directly affects hospital operations and patient privacy. The mention of "Healthcare System" and "2.3M Patients" clearly indicates this is a hospital-level incident requiring immediate attention from healthcare cybersecurity professionals.
+    #         """
+    #     elif "assess the severity" in prompt.lower():
+    #         return """
+    #         Severity: HIGH
+    #         Affected Count: 2300000
+    #         Reasoning: This is a high-severity incident due to the massive scale (2.3M affected individuals), the sensitive nature of healthcare data (PHI, medical records), and the operational impact on patient care. Healthcare data breaches carry additional regulatory and safety implications beyond typical business breaches.
+    #         """
+    #     elif "extract technical details" in prompt.lower():
+    #         return """
+    #         Technical Details:
+    #         - Attack vector: Ransomware deployment via compromised third-party vendor credentials
+    #         - Threat actor: RansomHub ransomware group (preliminary attribution based on TTPs)
+    #         - Data types compromised: PHI, SSNs, medical records, billing information
+    #         - Systems affected: Primary EHR platform and patient portal
+    #         - Impact duration: Systems offline for 72+ hours affecting patient care operations
+    #         - Recovery status: Partial systems restoration in progress
+    #         """
+    #     else:
+    #         return "Mock LLM response - replace with actual API integration"
 
     def parse_structured_response(self, response: str, expected_fields: List[str]) -> Dict[str, str]:
         """Parse LLM response for structured data"""
@@ -834,7 +850,7 @@ class TrueAIBreachAgent:
                 breakpoint()
 
             for article in articles_object:
-                article_new = confirm_article_url(article, today_str)
+                article_new = confirm_article_url(article)
                 okay_to_add_this_article = article_new is not None
                 if okay_to_add_this_article:
                     publish_date_of_this_article = article_new["publish_date"]
@@ -872,10 +888,14 @@ class TrueAIBreachAgent:
             
             Categories to choose from:
             - HOSPITAL: Direct hospital/health system incidents
-            - MEDICAL: Other medical/healthcare related (clinics, medical devices, etc.)
-            - BUSINESS: Non-healthcare business incidents (but relevant for threat intelligence)
+            - MEDICAL: Other medical/healthcare related (clinics, medical device companies, laboratories, direct patient care providers, etc.)
+            - BUSINESS: Non-healthcare business incidents (companies not primarily involved in providing healthcare products or services, such as banks, law firms, venture capital, insurance, or general businesses, but relevant for threat intelligence)
             
-            Only assign an article to the HOSPITAL category if the company that was breached is specifically called a hospital in the article. 
+            Guidelines:
+            - Only assign an article to the HOSPITAL category if the breached company is specifically called a hospital or health system in the article.
+            - Assign MEDICAL only if the organization provides direct medical products, services, patient care, operates clinics, medical device manufacturing, or healthcare delivery.
+            - Exclude investors, venture capital firms, banks, insurance, consulting, or law firms from MEDICAL unless they directly provide medical/healthcare services or are clearly described as such in the article.
+            - Default to BUSINESS for incidents involving entities that invest in, support, or provide services to healthcare/medical organizations, but do not themselves deliver medical/healthcare care or products.
             
             For healthcare cybersecurity professionals, consider:
             - PHI/medical data involvement
@@ -885,18 +905,18 @@ class TrueAIBreachAgent:
             
             Respond in this format:
             Category: [HOSPITAL/MEDICAL/BUSINESS]
-            Reasoning: [Your detailed analysis of why this categorization is appropriate]
+            Reasoning: [Your detailed analysis of why this categorization is appropriate, clearly justifying your choice according to the above instructions]
+
             """
 
         if LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CHAT_GPT_OPEN_AI:
             ai_response_object = call_chatGPT_api(categorization_prompt)
-            ai_response_message = ai_response_object.choices[0].message.content
         elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == PERPLEXITY:
             ai_response_object = call_perplexity_api(categorization_prompt)
-            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
         elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CLAUDE_ANTHROPIC:
             ai_response_object = call_claude_anthropic_api(categorization_prompt)
-            ai_response_message = ai_response_object.content[0].text
+
+        ai_response_message = get_text_message_from_llm_response(LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS, ai_response_object)
 
         clean_string = ai_response_message.strip().removeprefix('```json').removesuffix('```').strip()
 
@@ -1323,6 +1343,8 @@ class TrueAIBreachAgent:
 
         processed_incidents = []
 
+        # recluster_all_articles()
+
         articles = NewsArticle.objects.filter(
             created_at__range=(START_DATE, END_DATE)
         ).order_by('story_cluster_id', 'created_at')
@@ -1333,6 +1355,11 @@ class TrueAIBreachAgent:
         for result in articles:
             if result.story_cluster_id in story_cluster_ids:
                 print('Found duplicate story cluster id:', result.story_cluster_id)
+                continue
+
+            link_returns_200, final_resolved_url = link_returns_status_200(result.url, result.title)
+            result.url = final_resolved_url
+            if not link_returns_200:
                 continue
 
             story_cluster_ids.append(result.story_cluster_id)
@@ -1479,15 +1506,10 @@ class TrueAIBreachAgent:
         Provide the results in html format. Return only the html.
         """
 
-        if LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CHAT_GPT_OPEN_AI:
-            ai_response_object = call_chatGPT_api(summary_prompt)
-            ai_response_message = ai_response_object.choices[0].message.content
-        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == PERPLEXITY:
-            ai_response_object = call_perplexity_api(summary_prompt)
-            ai_response_message = ai_response_object["choices"][0]["message"]["content"]
-        elif LLM_TO_USE_FOR_EVERYTHING_BUT_NEWS == CLAUDE_ANTHROPIC:
-            ai_response_object = call_claude_anthropic_api(summary_prompt)
-            ai_response_message = ai_response_object.content[0].text
+        # chatGPT works better than Perplexity for this
+        # Perplexity often leaves out articles
+        ai_response_object = call_chatGPT_api(summary_prompt)
+        ai_response_message = get_text_message_from_llm_response(CHAT_GPT_OPEN_AI, ai_response_object)
 
         ai_response_message.replace("```html", "").replace("```", "")
         self.log_ai_decision("Final AI Summary", 'Wrap-Up', ai_response_message, "COMPLETED")
