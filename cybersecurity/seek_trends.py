@@ -1,4 +1,5 @@
 from django.db.models import Min
+from json_repair import repair_json
 
 from cybersecurity.analysis_settings import CHAT_GPT_OPEN_AI
 from cybersecurity.models import NewsArticle
@@ -8,7 +9,7 @@ import os
 from django.conf import settings
 from cybersecurity.report_latest_cybersecurity_news import call_google_gemini_api, call_chatGPT_api, \
     get_text_message_from_llm_response
-from json_repair import repair_json
+
 
 def seek_trends():
     articles = NewsArticle.objects.values('story_cluster_id').annotate(
@@ -16,6 +17,8 @@ def seek_trends():
     ).values(
         'id',
         'title',
+        'summary',
+        'url',
         'publish_date',
         'number_of_records_breached',
         'names_of_threat_actors',
@@ -29,6 +32,8 @@ def seek_trends():
         ## DATA CONTEXT
         You will receive a JSON array of cybersecurity breach articles with the following fields:
         - `title`: Article headline (usually contains the name of the breached organization)
+        - 'url' : url of the source article
+        - 'summary' : summary of the article
         - `publish_date`: When the article was published (datetime format)
         - `number_of_records_breached`: Number of records compromised (may be null/empty)
         - `names_of_threat_actors`: Known threat actors involved (may be null/empty)
@@ -38,11 +43,11 @@ def seek_trends():
         ### PHASE 1: Individual Field Trends Over Time
         Analyze each field independently for temporal patterns:
         
-        1. **Title Trends Analysis:**
-           - Extract organization names/types from titles (e.g., healthcare, financial, government, retail)
+        1. **Title and Summary Trends Analysis:**
+           - Extract organization names/types from titles/summaries (e.g., healthcare, financial, government, retail)
            - Identify industry sectors being targeted over time
            - Look for recurring keywords, attack types mentioned in headlines
-           - Track geographic patterns (if location mentioned in titles)
+           - Track geographic patterns (if location mentioned in titles/summaries)
            - Identify seasonal or cyclical patterns in breach announcements
         
         2. **Publication Date Trends:**
@@ -68,7 +73,7 @@ def seek_trends():
         3. **Breach Size + Industry:** Do certain industries experience larger breaches?
         4. **Threat Actor + Breach Size:** Do specific actors tend to cause larger/smaller breaches?
         5. **Geographic + Temporal:** Regional targeting patterns over time
-        6. **Attack Method + Industry:** If attack types are mentioned in titles, correlate with industries
+        6. **Attack Method + Industry:** If attack types are mentioned in titles/summries, correlate with industries
         
         ## OUTPUT FORMAT
         Return your analysis as a JSON object with this exact structure:
@@ -94,7 +99,8 @@ def seek_trends():
                 "key_findings": ["<finding1>", "<finding2>"],
                 "time_periods": ["<period1>", "<period2>"],
                 "frequency_data": "<relevant counts/percentages>"
-              }}
+                "supporting_links": [A few supporting links from the ANALYSIS_DATA, including a title and url in json format]
+              }},
             }}
           ],
           "combination_trends": [
@@ -107,6 +113,7 @@ def seek_trends():
                 "correlation_strength": "<strong/moderate/weak>",
                 "key_examples": ["<example1>", "<example2>"],
                 "statistical_significance": "<description>"
+                "supporting_links": [A few supporting links from the ANALYSIS_DATA, including a title and url in json format]
               }}
             }}
           ],
@@ -115,6 +122,7 @@ def seek_trends():
               "insight": "<key insight description>",
               "implications": "<potential business/security implications>",
               "recommendation": "<actionable recommendation based on trend>"
+                "supporting_links": [A few supporting links from the ANALYSIS_DATA, including a title and url in json format]
             }}
           ],
           "data_quality_notes": [
@@ -144,285 +152,136 @@ def seek_trends():
         
         Analyze the provided data systematically and return your findings in the specified JSON format.
         
-        Here is the data for you to analyze:
-        
+        Here is the data for you to analyze, which we are calling  ANALYSIS_DATA in this prompt:
         {articles_json}
     """
 
-    response = call_chatGPT_api(prompt)
-    response_message_text = get_text_message_from_llm_response(CHAT_GPT_OPEN_AI, response)
-    trend_json = repair_json(response_message_text)
+    GET_NEW_JSON_VIA_AGENT = False
 
-    file_path = settings.BASE_DIR / 'output' / 'seek_trends_raw_jason.json'
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(trend_json, indent=2))
+    if GET_NEW_JSON_VIA_AGENT:
+        response = call_chatGPT_api(prompt)
+        html_report_json_cleaned = get_text_message_from_llm_response(CHAT_GPT_OPEN_AI, response)
+        html_report_json_cleaned = repair_json(html_report_json_cleaned)
 
+        file_path = settings.BASE_DIR / 'output' / 'seek_trends_raw_jason.json'
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(html_report_json_cleaned)
+    else:
+        file_path = settings.BASE_DIR / 'output' / 'seek_trends_raw_jason.json'
+        with open(file_path, 'r', encoding='utf-8') as file:
+            html_report_json_cleaned = file.read()
 
     html_report_prompt = f"""
-        You are an Executive Cybersecurity Report Generator AI Agent. 
-        Your task is to convert technical trend analysis data into a professional, executive-level HTML report that provides clear insights and actionable recommendations for decision-makers
-        who are not cyber-security experts.  Theey 
+        You are converting structured data into an EMAIL-SAFE HTML document.
         
-        ## INPUT DATA
-        You will receive a JSON object containing cybersecurity breach trend analysis with the following structure:
-            - analysis_summary: Basic statistics and metadata
-        - individual_field_trends: Trends found in individual data fields
-        - combination_trends: Multi-field correlation patterns
-        - notable_insights: Key discoveries from the analysis
-        - data_quality_notes: Limitations and data quality observations
+        INPUT (JSON):
+        ```json
+        {html_report_json_cleaned}```
         
-        ## REPORT REQUIREMENTS
+        TASK:
+        Convert the JSON above into a single, self-contained HTML document that can be pasted directly into an email compose window (works in Outlook, Gmail, Apple Mail).
         
-        ### TARGET AUDIENCE
-        - C-suite executives (CEO, CISO, CTO)
-        - Security managers and directors
-        - Risk management professionals
-        - Board members with cybersecurity oversight
+        STRICT REQUIREMENTS:
         
-        ### WRITING STYLE GUIDELINES
-        - **Executive-friendly language**: Avoid technical jargon, use business terms
-        - **Action-oriented**: Focus on "what this means" and "what to do about it"
-        - **Quantified insights**: Include specific numbers, percentages, and timeframes
-        - **Risk-focused**: Emphasize business impact and security implications
-        - **Scannable format**: Use headers, bullet points, and visual hierarchy
-        - **Concise but comprehensive**: Thorough analysis in digestible chunks
+        Do not add, change, summarize, or omit any information. Preserve field names, values, order, and numeric/string formatting exactly.
         
-        ## HTML STRUCTURE REQUIREMENTS
+        No commentary or explanations—return only the HTML.
         
-        Create a complete HTML document with the following sections:
+        No external assets, <script>, <video>, or <form> tags.
         
-        ### 1. EXECUTIVE SUMMARY (300-400 words)
-        - **Overview**: Brief description of the analysis scope and timeframe
-        - **Key statistics**: Total articles analyzed, date range, most significant numbers
-        - **Top 3 critical findings**: Most important trends that require immediate attention
-        - **Bottom line**: Single paragraph summarizing the overall threat landscape and urgency level
+        All CSS must be INLINE on elements (assume <style> tags may be stripped by email clients).
         
-        ### 2. KEY FINDINGS (Organized by priority)
-        For each significant finding:
-        - **Clear headline**: What the trend is in plain English
-        - **Business impact**: Why this matters to the organization
-        - **Supporting evidence**: Specific data points and examples
-        - **Trend direction**: Is this getting better, worse, or stable?
-        - **Timeframe**: When this trend was observed
+        Use a centered, responsive container (max width 640px).
         
-        Organize findings by:
-        - **CRITICAL** (red): Immediate threats requiring urgent action
-        - **IMPORTANT** (orange): Significant trends requiring attention
-        - **NOTABLE** (yellow): Emerging patterns to monitor
+        Use semantic structure where possible, but prefer TABLES for any tabular/array data (email-client safe). Use lists/paragraphs for simple key/value content.
         
-        ### 3. RECOMMENDATIONS (Actionable and prioritized)
-        For each recommendation:
-        - **Action item**: Specific step to take
-        - **Timeline**: When to implement (immediate/30 days/90 days)
-        - **Responsible party**: Who should lead this initiative
-        - **Expected outcome**: What this will accomplish
-        - **Resource requirements**: High-level estimate of effort/cost
+        Escape all HTML special characters from the data.
         
-        ### 4. INDUSTRY & THREAT ACTOR INTELLIGENCE
-        - **Most targeted industries**: Which sectors are at highest risk
-        - **Emerging threat actors**: New or increasingly active groups
-        - **Attack trends**: Common methods and their evolution
-        - **Geographic patterns**: Regional targeting preferences
+        Convert URLs in values to clickable links. Email addresses should use mailto: links. Preserve original text as the link text unless it is excessively long (>80 chars), in which case truncate visually with ellipsis while keeping the full href.
         
-        ### 5. DATA INSIGHTS & METHODOLOGY
-        - **Analysis period**: Date range and scope
-        - **Data quality**: Limitations and confidence levels
-        - **Methodology notes**: How trends were identified
-        - **Recommendations for data improvement**: If applicable
+        Preserve line breaks in long text fields (use white-space: pre-wrap).
         
-        ## HTML FORMATTING REQUIREMENTS
-        ```html
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Cybersecurity Threat Trends Analysis Report</title>
-        <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        line-height: 1.6;
-        margin: 0;
-        padding: 20px;
-        background-color: #f5f5f5;
-        color: #333;
-        }}
-        .container {{
-            max-width: 1000px;
-        margin: 0 auto;
-        background: white;
-        padding: 40px;
-        border-radius: 10px;
-        box-shadow: 0 0 20px rgba(0,0,0,0.1);
-        }}
-        .header {{
-            text-align: center;
-        border-bottom: 3px solid #2c3e50;
-        padding-bottom: 20px;
-        margin-bottom: 30px;
-        }}
-        .report-title {{
-                           color: #2c3e50;
-                               font-size: 2.2em;
-        margin-bottom: 10px;
-        font-weight: 300;
-        }}
-        .report-subtitle {{
-                              color: #7f8c8d;
-                                  font-size: 1.1em;
-        margin-bottom: 5px;
-        }}
-        .date-range {{
-                         color: #95a5a6;
-                             font-size: 0.9em;
-        }}
-        .section {{
-            margin-bottom: 40px;
-        }}
-        .section-title {{
-                            color: #2c3e50;
-                                font-size: 1.8em;
-        border-left: 5px solid #3498db;
-        padding-left: 15px;
-        margin-bottom: 20px;
-        }}
-        .executive-summary {{
-                                background: #ecf0f1;
-                                    padding: 25px;
-        border-radius: 8px;
-        border-left: 5px solid #3498db;
-        }}
-        .finding {{
-            margin-bottom: 25px;
-        padding: 20px;
-        border-radius: 8px;
-        border-left: 5px solid;
-        }}
-        .finding.critical {{
-                               background: #fdf2f2;
-                                   border-left-color: #e74c3c;
-                           }}
-        .finding.important {{
-                                background: #fef9e7;
-                                    border-left-color: #f39c12;
-                            }}
-        .finding.notable {{
-                              background: #fffacd;
-                                  border-left-color: #f1c40f;
-                          }}
-        .finding-title {{
-            font-size: 1.3em;
-        font-weight: 600;
-        margin-bottom: 10px;
-        color: #2c3e50;
-        }}
-        .finding-impact {{
-            font-weight: 500;
-        margin-bottom: 8px;
-        color: #8e44ad;
-        }}
-        .recommendation {{
-                             background: #e8f6f3;
-                                 padding: 20px;
-        margin-bottom: 20px;
-        border-radius: 8px;
-        border-left: 5px solid #27ae60;
-        }}
-        .rec-title {{
-            font-size: 1.2em;
-        font-weight: 600;
-        color: #27ae60;
-        margin-bottom: 10px;
-        }}
-        .priority-high {{ background: #fdf2f2; border-left-color: #e74c3c; }}
-                        .priority-medium {{ background: #fef9e7; border-left-color: #f39c12; }}
-                                          .priority-low {{ background: #eafaf1; border-left-color: #27ae60; }}
-                                                         .stats-grid {{
-            display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 20px;
-        margin: 20px 0;
-        }}
-        .stat-box {{
-                       background: #34495e;
-                           color: white;
-        padding: 20px;
-        border-radius: 8px;
-        text-align: center;
-        }}
-        .stat-number {{
-            font-size: 2.5em;
-        font-weight: 300;
-        display: block;
-        }}
-        .stat-label {{
-            font-size: 0.9em;
-        opacity: 0.8;
-        }}
-        .timeline {{
-                       background: #f8f9fa;
-                           padding: 15px;
-        border-radius: 5px;
-        font-weight: 500;
-        }}
-        ul {{ padding-left: 20px; }}
-        li {{ margin-bottom: 8px; }}
-        .highlight {{ background: #fff3cd; padding: 2px 6px; border-radius: 3px; }}
-                    </style>
-                   </head>
-                     <body>
-                     <!-- Your generated content here -->
-        </body>
-          </html>
-            CONTENT GENERATION GUIDELINES
-        Executive Summary Best Practices:
+        Include accessible attributes (e.g., role="table", scope="col", <th> for headers). Provide alt text if you render any image URLs (but prefer links over images).
         
-        Start with the big picture and narrow down to specifics
-        Use quantified statements: "X% increase in attacks targeting Y industry"
-        Include comparative context: "highest level seen since..." or "represents a X% change from..."
-        End with a clear call-to-action or priority focus area
+        Ensure good contrast and readable defaults; avoid dark-mode inversion issues.
         
-        Key Findings Presentation:
+        LAYOUT & STYLE (INLINE on each element):
         
-            Lead with business impact, then provide technical details
-        Use trend indicators: ↑ ↓ → for visual quick reference
-        Include specific examples with anonymized organization types
-        Group related findings together for better comprehension
+        Root wrapper: <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0;padding:24px;background:#f6f8fa;">
         
-        Recommendations Structure:
+        Inner container (centered): <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
         
-            Prioritize by risk level and implementation feasibility
-        Include both immediate actions and long-term strategic initiatives
-        Provide clear success metrics where possible
-        Consider resource constraints and realistic timelines
+        Header: Title derived from top-level object key or "Report"
         
-        Data Visualization in Text:
+        Content sections for each top-level key
         
-        Convert percentages to relatable comparisons
-        Use phrases like "nearly doubled", "more than half", "one in four"
-        Include context for what constitutes "normal" vs "concerning" levels
-        Highlight both positive and negative trends for balanced perspective
+        Global inline styles to apply wherever relevant:
         
-        QUALITY STANDARDS
+        font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
         
-        Accuracy: All claims must be supported by the provided data
-        Clarity: Complex concepts explained in business terms
-        Completeness: Address all significant trends from the input data
-        Actionability: Every insight should lead to a clear recommendation
-        Professional presentation: Clean, scannable, executive-appropriate formatting
+        color: #111827; line-height: 1.5; font-size: 14px;
         
-        Generate a complete, professional HTML report that transforms the technical analysis into strategic intelligence for cybersecurity decision-makers.
-            
-        Here is the data for you to analyze:
+        Headings: margin: 0 0 8px; font-weight: 700; color: #111827;
         
-        {trend_json}
+        Section wrappers: padding: 20px 24px; border-top: 1px solid #f0f2f5; (omit the border for the first section)
+        
+        Key/value lists (non-tabular): use a two-column table to align labels and values; label cells bold with width ~30%.
+        
+        Data tables: role="table"; border-collapse: collapse; width: 100%;
+        
+        <th>: font-weight: 700; text-align: left; border-bottom: 1px solid #e5e7eb; padding: 10px 8px; background: #f9fafb;
+        <td>: border-bottom: 1px solid #f3f4f6; padding: 10px 8px; vertical-align: top;
+        Zebra rows: alternate row background #fcfcfd;
+        
+        Code/JSON fragments (if any): <pre> with font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#f6f8fa; padding:12px; border:1px solid #e5e7eb; border-radius:8px; white-space: pre-wrap; word-wrap: break-word;
+        
+        MAPPING RULES:
+        
+        If the value is:
+        
+        A primitive (string/number/bool): render in a two-column key/value layout.
+        
+        A flat object: render as a key/value table.
+        
+        An array of objects with consistent keys: render a data table (headers from keys) in object key order.
+        
+        An array of primitives: render as a bulleted list.
+        
+        Nested objects/arrays: create nested sections with <h2>/<h3> headings reflecting the key path (e.g., "Section › Subsection").
+        
+        Keep the original key names as labels (title-case for display only; don’t alter acronyms like ID, URL).
+        
+        For dates/times/numbers: DO NOT reformat—display exactly as provided.
+        
+        For null/empty: display “—” (em dash) to make empties visible, but do not claim a value.
+        
+        ACCESSIBILITY & ROBUSTNESS:
+        
+        Provide table headers with scope="col"; add aria-labels where helpful.
+        
+        Ensure links have discernible text; long URLs may be shortened visually but not in href.
+        
+        Avoid background-only color indicators (no meaning should rely solely on color).
+        
+        OUTPUT:
+        Return a single complete HTML document starting with <!doctype html> and including <html>, <body>, and the table-based wrapper structure described. No extra prose.        
+        
+        
     """
 
-    html_report_response = call_chatGPT_api(html_report_prompt)
-    response_message_text = get_text_message_from_llm_response(CHAT_GPT_OPEN_AI, html_report_response)
+    system_message_to_make_sure_we_get_html_back = (
+        "You convert arbitrary JSON into structured, email-safe HTML with inline CSS. "
+        "You MUST parse and traverse the JSON and render sections/tables/lists as instructed. "
+        "NEVER output the raw JSON or wrap the entire JSON in <pre>. "
+        "Only use <pre> for individual values explicitly named code-like (e.g., 'code', 'stack_trace', 'log'). "
+        "Return ONLY raw HTML. The very first characters must be: <!doctype html>"
+    )
+    html_report_response = call_chatGPT_api(prompt, system_message=system_message_to_make_sure_we_get_html_back)
+    html_report_html = get_text_message_from_llm_response(CHAT_GPT_OPEN_AI, html_report_response)
 
-    file_path = settings.BASE_DIR / 'output' / 'seek_trends_html_report.json'
+
+    file_path = settings.BASE_DIR / 'output' / 'seek_trends_html_report.html'
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(response_message_text, indent=2))
+        f.write(html_report_html)
 
     pass

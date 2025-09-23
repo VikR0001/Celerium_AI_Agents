@@ -338,7 +338,7 @@ def call_google_gemini_api(prompt):
 
     return response
 
-def call_chatGPT_api(prompt, model_specifier = 'gpt-5'):
+def call_chatGPT_api(prompt, model_specifier = 'gpt-5', system_message = "You are an expert in cyber security breaches."):
 
     MODEL_PRICES = {
         "gpt-4o": {"input": 5.0, "output": 15.0},   # $5 / $15
@@ -379,8 +379,10 @@ def call_chatGPT_api(prompt, model_specifier = 'gpt-5'):
     response = openAI_client.chat.completions.create(
         model=MODEL,  # you can also use "gpt-4o-mini", "gpt-4o", etc.
         messages=[
-            {"role": "system", "content": "You are an expert in cyber security breaches."},
-            {"role": "user", "content": prompt}
+            {"role": "system",
+             "content": system_message},
+            {"role": "user",
+             "content": prompt}
         ]
     )
 
