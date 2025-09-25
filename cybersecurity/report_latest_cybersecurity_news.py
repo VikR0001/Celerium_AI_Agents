@@ -229,9 +229,9 @@ def call_claude_anthropic_api(prompt):
 
     return response
 
-def call_google_gemini_api(prompt):
+def call_google_gemini_api(prompt, model = 'gemini-2.5-flash'):
     global total_cost
-    model = 'gemini-2.5-flash'
+    model = model
 
     # Note: Pricing tiers are based on the length of the prompt (in tokens).
     MODEL_PRICES = {

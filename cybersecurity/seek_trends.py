@@ -1,7 +1,7 @@
 from django.db.models import Min
 from json_repair import repair_json
 
-from cybersecurity.analysis_settings import CHAT_GPT_OPEN_AI
+from cybersecurity.analysis_settings import CHAT_GPT_OPEN_AI, GEMINI_GOOGLE
 from cybersecurity.models import NewsArticle
 import json
 from django.core.serializers.json import DjangoJSONEncoder
@@ -10,8 +10,9 @@ from django.conf import settings
 from cybersecurity.report_latest_cybersecurity_news import call_google_gemini_api, call_chatGPT_api, \
     get_text_message_from_llm_response
 
+def do_analysis_of_past_4_weeks():
 
-def seek_trends():
+def seek_trends(llm_to_use=CHAT_GPT_OPEN_AI, days=30, category= ''):
     articles = NewsArticle.objects.values('story_cluster_id').annotate(
         earliest_date=Min('publish_date')
     ).values(
@@ -26,7 +27,7 @@ def seek_trends():
 
     articles_json = json.dumps(list(articles), cls=DjangoJSONEncoder, indent=2)
 
-    prompt = f"""
+    prompt_to_find_trends = f"""
         You are a Cybersecurity Trend Analysis AI Agent. Your task is to analyze news articles about cybersecurity breaches and identify meaningful trends across multiple dimensions.
         
         ## DATA CONTEXT
@@ -99,7 +100,7 @@ def seek_trends():
                 "key_findings": ["<finding1>", "<finding2>"],
                 "time_periods": ["<period1>", "<period2>"],
                 "frequency_data": "<relevant counts/percentages>"
-                "supporting_links": [A few supporting links from the ANALYSIS_DATA, including a title and url in json format]
+                "supporting_links": [Links to all articles from the ANALYSIS_DATA that you reference in your "description" , including a title and url in json format]
               }},
             }}
           ],
@@ -113,7 +114,7 @@ def seek_trends():
                 "correlation_strength": "<strong/moderate/weak>",
                 "key_examples": ["<example1>", "<example2>"],
                 "statistical_significance": "<description>"
-                "supporting_links": [A few supporting links from the ANALYSIS_DATA, including a title and url in json format]
+                "supporting_links": [Links to all articles from the ANALYSIS_DATA that you reference in your "description" , including a title and url in json format]
               }}
             }}
           ],
@@ -122,7 +123,7 @@ def seek_trends():
               "insight": "<key insight description>",
               "implications": "<potential business/security implications>",
               "recommendation": "<actionable recommendation based on trend>"
-                "supporting_links": [A few supporting links from the ANALYSIS_DATA, including a title and url in json format]
+                "supporting_links": [Links to all articles from the ANALYSIS_DATA that you reference in your "description" , including a title and url in json format]
             }}
           ],
           "data_quality_notes": [
@@ -152,135 +153,72 @@ def seek_trends():
         
         Analyze the provided data systematically and return your findings in the specified JSON format.
         
-        Here is the data for you to analyze, which we are calling  ANALYSIS_DATA in this prompt:
+        Here is the data for you to analyze, which we are calling  ANALYSIS_DATA in this prompt_to_find_trends:
         {articles_json}
     """
 
     GET_NEW_JSON_VIA_AGENT = False
+    LLM_TO_USE_WITH_THIS_FUNCTION = llm_to_use #Can be CHAT_GPT_OPEN_AI or GEMINI_GOOGLE
 
     if GET_NEW_JSON_VIA_AGENT:
-        response = call_chatGPT_api(prompt)
-        html_report_json_cleaned = get_text_message_from_llm_response(CHAT_GPT_OPEN_AI, response)
+        if LLM_TO_USE_WITH_THIS_FUNCTION == CHAT_GPT_OPEN_AI:
+            response = call_chatGPT_api(prompt_to_find_trends)
+        elif LLM_TO_USE_WITH_THIS_FUNCTION == GEMINI_GOOGLE:
+            response = call_google_gemini_api(prompt_to_find_trends, model = 'gemini-2.5-pro')
+        else:
+            breakpoint()
+
+        html_report_json_cleaned = get_text_message_from_llm_response(LLM_TO_USE_WITH_THIS_FUNCTION, response)
         html_report_json_cleaned = repair_json(html_report_json_cleaned)
 
-        file_path = settings.BASE_DIR / 'output' / 'seek_trends_raw_jason.json'
+        filename = f"seek_trends_raw_json-{'chatGPT' if LLM_TO_USE_WITH_THIS_FUNCTION == CHAT_GPT_OPEN_AI else 'gemini'}.json"
+        file_path = settings.BASE_DIR / 'output' / filename
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(html_report_json_cleaned)
     else:
-        file_path = settings.BASE_DIR / 'output' / 'seek_trends_raw_jason.json'
+        filename = f"seek_trends_raw_json-{'chatGPT' if LLM_TO_USE_WITH_THIS_FUNCTION == CHAT_GPT_OPEN_AI else 'gemini'}.json"
+        file_path = settings.BASE_DIR / 'output' / filename
         with open(file_path, 'r', encoding='utf-8') as file:
             html_report_json_cleaned = file.read()
 
-    html_report_prompt = f"""
-        You are converting structured data into an EMAIL-SAFE HTML document.
+    prompt_to_format_report_as_html = f"""
+        You will receive JSON data below. Your task is to:
+        1. Parse and understand the data structure
+        2. Extract the key information 
+        3. Present it as a clean, professional HTML report (not raw JSON)
+        4. Use proper HTML formatting with headings, paragraphs, tables, etc.
+        5. Include inline CSS for professional email styling
         
-        INPUT (JSON):
-        ```json
-        {html_report_json_cleaned}```
+        JSON data:
+        {html_report_json_cleaned}
+
+        The report should be easy for non-experts to read and understand. It should use some color and also bullet points so as to be easy for non-experts to understand.
         
-        TASK:
-        Convert the JSON above into a single, self-contained HTML document that can be pasted directly into an email compose window (works in Outlook, Gmail, Apple Mail).
-        
-        STRICT REQUIREMENTS:
-        
-        Do not add, change, summarize, or omit any information. Preserve field names, values, order, and numeric/string formatting exactly.
-        
-        No commentary or explanations—return only the HTML.
-        
-        No external assets, <script>, <video>, or <form> tags.
-        
-        All CSS must be INLINE on elements (assume <style> tags may be stripped by email clients).
-        
-        Use a centered, responsive container (max width 640px).
-        
-        Use semantic structure where possible, but prefer TABLES for any tabular/array data (email-client safe). Use lists/paragraphs for simple key/value content.
-        
-        Escape all HTML special characters from the data.
-        
-        Convert URLs in values to clickable links. Email addresses should use mailto: links. Preserve original text as the link text unless it is excessively long (>80 chars), in which case truncate visually with ellipsis while keeping the full href.
-        
-        Preserve line breaks in long text fields (use white-space: pre-wrap).
-        
-        Include accessible attributes (e.g., role="table", scope="col", <th> for headers). Provide alt text if you render any image URLs (but prefer links over images).
-        
-        Ensure good contrast and readable defaults; avoid dark-mode inversion issues.
-        
-        LAYOUT & STYLE (INLINE on each element):
-        
-        Root wrapper: <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0;padding:24px;background:#f6f8fa;">
-        
-        Inner container (centered): <table role="presentation" cellpadding="0" cellspacing="0" align="center" style="width:100%;max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
-        
-        Header: Title derived from top-level object key or "Report"
-        
-        Content sections for each top-level key
-        
-        Global inline styles to apply wherever relevant:
-        
-        font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-        
-        color: #111827; line-height: 1.5; font-size: 14px;
-        
-        Headings: margin: 0 0 8px; font-weight: 700; color: #111827;
-        
-        Section wrappers: padding: 20px 24px; border-top: 1px solid #f0f2f5; (omit the border for the first section)
-        
-        Key/value lists (non-tabular): use a two-column table to align labels and values; label cells bold with width ~30%.
-        
-        Data tables: role="table"; border-collapse: collapse; width: 100%;
-        
-        <th>: font-weight: 700; text-align: left; border-bottom: 1px solid #e5e7eb; padding: 10px 8px; background: #f9fafb;
-        <td>: border-bottom: 1px solid #f3f4f6; padding: 10px 8px; vertical-align: top;
-        Zebra rows: alternate row background #fcfcfd;
-        
-        Code/JSON fragments (if any): <pre> with font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#f6f8fa; padding:12px; border:1px solid #e5e7eb; border-radius:8px; white-space: pre-wrap; word-wrap: break-word;
-        
-        MAPPING RULES:
-        
-        If the value is:
-        
-        A primitive (string/number/bool): render in a two-column key/value layout.
-        
-        A flat object: render as a key/value table.
-        
-        An array of objects with consistent keys: render a data table (headers from keys) in object key order.
-        
-        An array of primitives: render as a bulleted list.
-        
-        Nested objects/arrays: create nested sections with <h2>/<h3> headings reflecting the key path (e.g., "Section › Subsection").
-        
-        Keep the original key names as labels (title-case for display only; don’t alter acronyms like ID, URL).
-        
-        For dates/times/numbers: DO NOT reformat—display exactly as provided.
-        
-        For null/empty: display “—” (em dash) to make empties visible, but do not claim a value.
-        
-        ACCESSIBILITY & ROBUSTNESS:
-        
-        Provide table headers with scope="col"; add aria-labels where helpful.
-        
-        Ensure links have discernible text; long URLs may be shortened visually but not in href.
-        
-        Avoid background-only color indicators (no meaning should rely solely on color).
-        
-        OUTPUT:
-        Return a single complete HTML document starting with <!doctype html> and including <html>, <body>, and the table-based wrapper structure described. No extra prose.        
-        
-        
+        It should have these sections:
+        - Introduction
+        - Executive Summary
+        - Key Findings
+        - Summary of Findings
     """
 
-    system_message_to_make_sure_we_get_html_back = (
-        "You convert arbitrary JSON into structured, email-safe HTML with inline CSS. "
-        "You MUST parse and traverse the JSON and render sections/tables/lists as instructed. "
-        "NEVER output the raw JSON or wrap the entire JSON in <pre>. "
-        "Only use <pre> for individual values explicitly named code-like (e.g., 'code', 'stack_trace', 'log'). "
-        "Return ONLY raw HTML. The very first characters must be: <!doctype html>"
-    )
-    html_report_response = call_chatGPT_api(prompt, system_message=system_message_to_make_sure_we_get_html_back)
-    html_report_html = get_text_message_from_llm_response(CHAT_GPT_OPEN_AI, html_report_response)
+    # system_message_to_make_sure_we_get_html_back = (
+    #     "You convert arbitrary JSON into structured, email-safe HTML with inline CSS. "
+    #     "You MUST parse and traverse the JSON and render sections/tables/lists as instructed. "
+    #     "Return ONLY raw HTML. The very first characters must be: <!doctype html>"
+    # )
 
+    html_report_response = None
+    if LLM_TO_USE_WITH_THIS_FUNCTION == CHAT_GPT_OPEN_AI:
+        html_report_response = call_chatGPT_api(prompt_to_format_report_as_html)
+    elif LLM_TO_USE_WITH_THIS_FUNCTION == GEMINI_GOOGLE:
+        html_report_response = call_google_gemini_api(prompt_to_format_report_as_html, model = 'gemini-2.5-pro')
+    else:
+        breakpoint()
 
-    file_path = settings.BASE_DIR / 'output' / 'seek_trends_html_report.html'
+    html_report_html = get_text_message_from_llm_response(LLM_TO_USE_WITH_THIS_FUNCTION, html_report_response)
+
+    filename = f"seek_trends_html_report-{'chatGPT' if LLM_TO_USE_WITH_THIS_FUNCTION == CHAT_GPT_OPEN_AI else 'gemini'}.html"
+    file_path = settings.BASE_DIR / 'output' / filename
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(html_report_html)
 
