@@ -652,7 +652,7 @@ def extract_reasoning_and_json(text):
             response_object, idx = decoder.raw_decode(json_object_as_string)
         except json.JSONDecodeError as e:
             print("Decoder error:", e, "probably the LLM returned invalid json")
-            breakpoint()
+            # breakpoint()
     else:
         print("Search string not found - article not found")
 
@@ -778,6 +778,7 @@ class TrueAIBreachAgent:
     def get_news_from_llm(self) -> List[NewsItem]:
         """Retrieve today's cybersecurity breach news using Gemini or Perplexity responses."""
         today_str = datetime.now().strftime("%B %d, %Y")
+        new_articles_object = None
 
         prompt = f"""You are a specialized AI assistant for news retrieval with a single purpose: to find articles aboutcybersecurity breaches.
             The articles you find MUST have a publish date in this range: ["{today_str} 00:00" to "{today_str} 23:59" UTC]. This is VERY IMPORTANT! 
@@ -829,7 +830,7 @@ class TrueAIBreachAgent:
         python_object = call_google_gemini_api(prompt)
         if python_object is None:
             print('get_news_from_llm - No news stories found')
-            breakpoint()
+            exit(1)
 
         reasoning = None
         articles_object = None
@@ -849,7 +850,7 @@ class TrueAIBreachAgent:
             today_str = regularize_date_format_for_use_in_html(today_str)
             if articles_object is None:
                 #no articles found
-                breakpoint()
+                return new_articles_object
 
             for article in articles_object:
                 article_new = confirm_article_url(article)
@@ -859,8 +860,8 @@ class TrueAIBreachAgent:
                     publish_date_of_this_article = regularize_date_format_for_use_in_html(publish_date_of_this_article)
                     if publish_date_of_this_article != today_str:
                         okay_to_add_this_article = False
-                if okay_to_add_this_article:
-                    new_articles_object.append(article_new)
+                    if okay_to_add_this_article:
+                        new_articles_object.append(article_new)
                 else:
                     print(f"***Couldn't find a url and/or a date for this one: {article['title']}")
 
@@ -993,7 +994,7 @@ class TrueAIBreachAgent:
             parsed = self.llm.parse_structured_response(clean_string, ["Severity", "Affected Count", "Reasoning"])
         except Exception as e:
             print('unexpected response from LLM for severity_prompt')
-            breakpoint()
+            # breakpoint()
             exit(1)
 
         severity_str = parsed.get("severity", "MEDIUM").upper()
@@ -1003,7 +1004,7 @@ class TrueAIBreachAgent:
         try:
             severity = SeverityLevel(severity_str.replace('*', '').lower())
         except ValueError:
-            breakpoint()
+            # breakpoint()
             reasoning += f" (Note: AI returned '{severity_str}', defaulted to MEDIUM)"
 
         # Extract affected count
