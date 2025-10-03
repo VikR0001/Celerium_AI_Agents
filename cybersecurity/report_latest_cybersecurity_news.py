@@ -338,7 +338,7 @@ def call_google_gemini_api(prompt, model = 'gemini-2.5-flash'):
 
     return response
 
-def call_chatGPT_api(prompt, model_specifier = 'gpt-5', system_message = "You are an expert in cyber security breaches."):
+def call_chatGPT_api(prompt, model_specifier = 'gpt-5', system_message = "You are an expert in cyber security breaches.", response_format = None):
 
     MODEL_PRICES = {
         "gpt-4o": {"input": 5.0, "output": 15.0},   # $5 / $15
@@ -376,15 +376,22 @@ def call_chatGPT_api(prompt, model_specifier = 'gpt-5', system_message = "You ar
 
     MODEL = model_specifier
 
-    response = openAI_client.chat.completions.create(
-        model=MODEL,  # you can also use "gpt-4o-mini", "gpt-4o", etc.
-        messages=[
-            {"role": "system",
-             "content": system_message},
-            {"role": "user",
-             "content": prompt}
-        ]
-    )
+
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": prompt}
+    ]
+
+    kwargs = {
+        "model": model_specifier,
+        "messages": messages,
+    }
+
+    # Only include response_format if it's provided
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+
+    response = openAI_client.chat.completions.create(**kwargs)
 
     cost = estimate_ChatGPT_cost(response, MODEL)
     total_cost += cost
