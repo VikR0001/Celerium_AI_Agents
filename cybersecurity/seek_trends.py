@@ -16,6 +16,8 @@ from hashlib import md5
 import re
 from html import escape
 from hashlib import md5
+from django.db.models import Min, OuterRef, Subquery
+
 
 def do_analysis_of_how_the_past_7_days_fits_into_the_trends(LLM_TO_USE_WITH_THIS_FUNCTION, trend_analysis_object):
     def badge_key(name: str) -> str:
@@ -557,8 +559,18 @@ def do_analysis_of_how_the_past_7_days_fits_into_the_trends(LLM_TO_USE_WITH_THIS
     return html_report;
 
 def do_analysis_of_past_4_weeks(LLM_TO_USE_WITH_THIS_FUNCTION):
-    articles = NewsArticle.objects.values('story_cluster_id').annotate(
-        earliest_date=Min('publish_date')
+    min_dates = NewsArticle.objects.filter(
+        story_cluster_id=OuterRef('story_cluster_id')
+    ).values(
+        'story_cluster_id'
+    ).annotate(
+        min_date=Min('publish_date')
+    ).values('min_date')
+
+    # Filter the main queryset to include only articles
+    # whose publish_date matches the min_date for their cluster.
+    articles = NewsArticle.objects.filter(
+        publish_date=Subquery(min_dates)
     ).values(
         'id',
         'title',
@@ -568,7 +580,6 @@ def do_analysis_of_past_4_weeks(LLM_TO_USE_WITH_THIS_FUNCTION):
         'number_of_records_breached',
         'names_of_threat_actors',
     ).order_by('publish_date')
-
     articles_json = json.dumps(list(articles), cls=DjangoJSONEncoder, indent=2)
 
     prompt_to_find_trends = f"""
@@ -722,6 +733,7 @@ def seek_trends(llm_to_use=CHAT_GPT_OPEN_AI, days=30, category= ''):
     LLM_TO_USE_WITH_THIS_FUNCTION = llm_to_use #Can be CHAT_GPT_OPEN_AI or GEMINI_GOOGLE
     PERFORM_NEW_ANALYSIS_OF_PAST_30_DAYS = True
     OUTPUT_NEW_HTML_REPORT_FOR_PAST_30_DAYS = True
+    PERFORM_NEW_ANALYSIS_OF_PAST_7_DAYS = True
 
     if PERFORM_NEW_ANALYSIS_OF_PAST_30_DAYS:
         html_report_json_cleaned = do_analysis_of_past_4_weeks(LLM_TO_USE_WITH_THIS_FUNCTION)
@@ -748,7 +760,6 @@ def seek_trends(llm_to_use=CHAT_GPT_OPEN_AI, days=30, category= ''):
             It should have these sections:
             - Introduction
             - Executive Summary
-            - Key Findings
             - Summary of Findings
         """
 
@@ -767,6 +778,7 @@ def seek_trends(llm_to_use=CHAT_GPT_OPEN_AI, days=30, category= ''):
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(html_report_html)
 
-    past_7_days_trends_html = do_analysis_of_how_the_past_7_days_fits_into_the_trends(LLM_TO_USE_WITH_THIS_FUNCTION, html_report_json_cleaned)
+    if PERFORM_NEW_ANALYSIS_OF_PAST_7_DAYS:
+        past_7_days_trends_html = do_analysis_of_how_the_past_7_days_fits_into_the_trends(LLM_TO_USE_WITH_THIS_FUNCTION, html_report_json_cleaned)
 
     pass
