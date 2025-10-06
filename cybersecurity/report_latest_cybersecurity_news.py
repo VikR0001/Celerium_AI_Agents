@@ -3,6 +3,7 @@ Cybersecurity Breach News AI Agent
 This agent searches for cybersecurity breach news from today and sends email alerts.
 """
 import re
+import sys
 
 import openai
 from google import genai
@@ -290,8 +291,7 @@ def call_google_gemini_api(prompt, model = 'gemini-2.5-flash'):
 
         if model not in MODEL_PRICES:
             print(f"Pricing not defined for model: {model}")
-            breakpoint()
-            return 0
+            sys.exit(100)
 
         # Handle tiered pricing for Gemini 2.5 Pro
         if model == "gemini-2.5-pro":
@@ -428,7 +428,7 @@ def call_perplexity_api(prompt: str):
         print('call_perplexity_api: ', e, 'status code: ', response.status_code)
         if response.status_code == 401:
             print('May need to top off perplexity account funds. Buy more at https://www.perplexity.ai/account/api/billing')
-            breakpoint()
+            sys.exit(100)
 
     try:
         input_tokens = result['usage']['prompt_tokens']
